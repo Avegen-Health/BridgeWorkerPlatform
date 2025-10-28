@@ -28,7 +28,7 @@ deploy:
   env: bridgeworker-$TRAVIS_BRANCH
   bucket:
     develop: elasticbeanstalk-us-east-1-420786776710
-    uat: elasticbeanstalk-us-east-1-420786776710
+    uat: elasticbeanstalk-gvbridge-worker-uat-us-east-1-420786776710
     prod: elasticbeanstalk-us-east-1-649232250620
   zip-file: target/BridgeWorkerPlatform-1.0.war
   on:
