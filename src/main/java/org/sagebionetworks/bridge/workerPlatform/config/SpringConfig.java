@@ -85,19 +85,20 @@ public class SpringConfig {
         String appId = config.get("bridge.worker.appId");
         String email = config.get("bridge.worker.email");
         String password = config.get("bridge.worker.password");
+        String bridge_server = config.get("bridge.server");
         LOG.info("AnandLog: appId: " + appId);
         LOG.info("AnandLog: email: " + email);
         LOG.info("AnandLog: password: " + password);
-        LOG.info("AnandLog: BRIDGE_SERVER: " + System.getenv("BRIDGE_SERVER"));
+        LOG.info("AnandLog: bridge_server: " + bridge_server);
         SignIn signIn = new SignIn().appId(appId).email(email).password(password);
         LOG.info("AnandLog: signIn: " + signIn.toString());
 
         
-
-        //ClientInfo clientInfo = new ClientInfo().appName("BridgeWorkerPlatform").appVersion(1);
-        ClientInfo clientInfo = new ClientInfo().appName("BiAffect3").appVersion(1);
+        org.sagebionetworks.bridge.rest.Config restConf = new org.sagebionetworks.bridge.rest.Config();
+        restConf.setProperty(Config.Props.HOST, bridge_server);
+        ClientInfo clientInfo = new ClientInfo().appName("BridgeWorkerPlatform").appVersion(1);
         LOG.info("AnandLog: clientInfo: " + clientInfo.toString());
-        ClientManager clientManager = new ClientManager.Builder().withClientInfo(clientInfo).withSignIn(signIn).build();
+        ClientManager clientManager = new ClientManager.Builder().withConfig(restConf)withClientInfo(clientInfo).withSignIn(signIn).build();
         LOG.info("AnandLog: clientManager: " + clientManager.toString());
 
         AuthenticationApi authApi = clientManager.getClient(AuthenticationApi.class);
