@@ -98,7 +98,7 @@ public class SpringConfig {
         restConf.setProperty(Config.Props.HOST, bridge_server);
         ClientInfo clientInfo = new ClientInfo().appName("BridgeWorkerPlatform").appVersion(1);
         LOG.info("AnandLog: clientInfo: " + clientInfo.toString());
-        ClientManager clientManager = new ClientManager.Builder().withConfig(restConf)withClientInfo(clientInfo).withSignIn(signIn).build();
+        ClientManager clientManager = new ClientManager.Builder().withConfig(restConf).withClientInfo(clientInfo).withSignIn(signIn).build();
         LOG.info("AnandLog: clientManager: " + clientManager.toString());
 
         AuthenticationApi authApi = clientManager.getClient(AuthenticationApi.class);
