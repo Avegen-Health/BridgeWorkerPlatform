@@ -362,6 +362,8 @@ public class Exporter3WorkerProcessor implements ThrowingConsumer<JsonNode> {
         File tempDir = fileHelper.createTempDir();
         try {
             // Step 1: Download from S3.
+            LOG.info("AnandLog: Downloading from S3: appId=" + appId + ", uploadId=" + uploadId);
+            LOG.info("AnandLog: uploadBucket: " + uploadBucket);
             File downloadedFile = fileHelper.newFile(tempDir, uploadId);
             s3Helper.downloadS3File(uploadBucket, uploadId, downloadedFile);
 
