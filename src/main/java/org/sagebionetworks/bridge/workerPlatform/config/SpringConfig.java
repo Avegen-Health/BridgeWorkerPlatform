@@ -104,10 +104,10 @@ public class SpringConfig {
             UserSessionInfo session = authApi.signInV4(signIn)
                 .execute()
                 .body();
+            LOG.info("AnandLog: Signed in user ID: " + session.getId());
         } catch (Exception e) {
             LOG.error("AnandLog: Failed to sign in: " + e.getMessage());
         }
-        LOG.info("AnandLog: Signed in user ID: " + session.getId());
 
         return clientManager;
     }
