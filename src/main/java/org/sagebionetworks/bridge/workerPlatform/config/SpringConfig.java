@@ -62,6 +62,8 @@ import org.sagebionetworks.bridge.uploadcomplete.S3EventNotificationCallback;
 import org.sagebionetworks.bridge.worker.ThrowingConsumer;
 import org.sagebionetworks.bridge.workerPlatform.multiplexer.BridgeWorkerPlatformSqsCallback;
 import org.sagebionetworks.bridge.workerPlatform.util.Constants;
+import org.sagebionetworks.bridge.rest.api.AuthenticationApi;
+import org.sagebionetworks.bridge.rest.model.UserSessionInfo;
 
 // These configs get credentials from the default credential chain. For developer desktops, this is ~/.aws/credentials.
 // For EC2 instances, this happens transparently.
@@ -89,6 +91,12 @@ public class SpringConfig {
         LOG.info("AnandLog: BRIDGE_SERVER: " + System.getenv("BRIDGE_SERVER"));
         SignIn signIn = new SignIn().appId(appId).email(email).password(password);
         LOG.info("AnandLog: signIn: " + signIn.toString());
+
+        AuthenticationApi authApi = clientManager.getClient(AuthenticationApi.class);
+        UserSessionInfo session = authApi.signInV4(signIn)
+                .execute()
+                .body();
+        LOG.info("AnandLog: Signed in user ID: " + session.getId());
 
         ClientInfo clientInfo = new ClientInfo().appName("BridgeWorkerPlatform").appVersion(1);
         LOG.info("AnandLog: clientInfo: " + clientInfo.toString());
