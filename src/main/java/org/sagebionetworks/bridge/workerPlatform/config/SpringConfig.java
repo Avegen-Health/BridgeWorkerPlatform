@@ -100,11 +100,15 @@ public class SpringConfig {
         LOG.info("AnandLog: clientManager: " + clientManager.toString());
 
         AuthenticationApi authApi = clientManager.getClient(AuthenticationApi.class);
-        UserSessionInfo session = authApi.signInV4(signIn)
+        try {
+            UserSessionInfo session = authApi.signInV4(signIn)
                 .execute()
                 .body();
+        } catch (Exception e) {
+            LOG.error("AnandLog: Failed to sign in: " + e.getMessage());
+        }
         LOG.info("AnandLog: Signed in user ID: " + session.getId());
-        
+
         return clientManager;
     }
 
