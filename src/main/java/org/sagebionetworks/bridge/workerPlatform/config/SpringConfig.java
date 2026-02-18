@@ -86,10 +86,15 @@ public class SpringConfig {
         LOG.info("AnandLog: appId: " + appId);
         LOG.info("AnandLog: email: " + email);
         LOG.info("AnandLog: password: " + password);
+        LOG.info("AnandLog: BRIDGE_SERVER: " + System.getenv("BRIDGE_SERVER"));
         SignIn signIn = new SignIn().appId(appId).email(email).password(password);
+        LOG.info("AnandLog: signIn: " + signIn.toString());
 
         ClientInfo clientInfo = new ClientInfo().appName("BridgeWorkerPlatform").appVersion(1);
-        return new ClientManager.Builder().withClientInfo(clientInfo).withSignIn(signIn).build();
+        LOG.info("AnandLog: clientInfo: " + clientInfo.toString());
+        ClientManager clientManager = new ClientManager.Builder().withClientInfo(clientInfo).withSignIn(signIn).build();
+        LOG.info("AnandLog: clientManager: " + clientManager.toString());
+        return clientManager;
     }
 
     @Bean

@@ -284,6 +284,12 @@ public class BridgeHelper {
     /** Gets the app for the given ID. */
     public App getApp(String appId) throws IOException {
         LOG.info("AnandLog: Getting app for app ID: " + appId);
+        AuthenticationApi authApi = clientManager.getClient(AuthenticationApi.class);
+        UserSessionInfo session = authApi.signInV4(signIn)
+                .execute()
+                .body();
+        LOG.info("AnandLog: Signed in user ID: " + session.getId());
+        
         return clientManager.getClient(ForWorkersApi.class).getApp(appId).execute().body();
     }
 
