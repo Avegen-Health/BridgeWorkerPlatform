@@ -83,6 +83,9 @@ public class SpringConfig {
         String appId = config.get("bridge.worker.appId");
         String email = config.get("bridge.worker.email");
         String password = config.get("bridge.worker.password");
+        LOG.info("AnandLog: appId: " + appId);
+        LOG.info("AnandLog: email: " + email);
+        LOG.info("AnandLog: password: " + password);
         SignIn signIn = new SignIn().appId(appId).email(email).password(password);
 
         ClientInfo clientInfo = new ClientInfo().appName("BridgeWorkerPlatform").appVersion(1);

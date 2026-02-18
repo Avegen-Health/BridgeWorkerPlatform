@@ -207,6 +207,7 @@ public class Exporter3WorkerProcessor implements ThrowingConsumer<JsonNode> {
             PollSqsWorkerRetryableException, SynapseException, WorkerException {
         // Check to see that Synapse is up and availabe for read/write. If it isn't, throw an exception, so the
         // PollSqsWorker can re-cycle the request until Synapse is available again.
+        LOG.info("AnandLog: Checking if Synapse is writable")
         if (!synapseHelper.isSynapseWritable()) {
             throw new PollSqsWorkerRetryableException("Synapse is not writable");
         }
