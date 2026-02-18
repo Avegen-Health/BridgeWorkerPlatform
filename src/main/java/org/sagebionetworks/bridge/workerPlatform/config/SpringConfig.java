@@ -94,7 +94,8 @@ public class SpringConfig {
 
         
 
-        ClientInfo clientInfo = new ClientInfo().appName("BridgeWorkerPlatform").appVersion(1);
+        //ClientInfo clientInfo = new ClientInfo().appName("BridgeWorkerPlatform").appVersion(1);
+        ClientInfo clientInfo = new ClientInfo().appName("BiAffect3").appVersion(1);
         LOG.info("AnandLog: clientInfo: " + clientInfo.toString());
         ClientManager clientManager = new ClientManager.Builder().withClientInfo(clientInfo).withSignIn(signIn).build();
         LOG.info("AnandLog: clientManager: " + clientManager.toString());
