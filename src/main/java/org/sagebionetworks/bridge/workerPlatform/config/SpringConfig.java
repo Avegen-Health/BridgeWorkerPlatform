@@ -95,7 +95,7 @@ public class SpringConfig {
 
         
         org.sagebionetworks.bridge.rest.Config restConf = new org.sagebionetworks.bridge.rest.Config();
-        restConf.setProperty(org.sagebionetworks.bridge.rest.Config.Props.HOST, bridge_server);
+        restConf.set(org.sagebionetworks.bridge.rest.Config.Props.HOST, bridge_server);
         ClientInfo clientInfo = new ClientInfo().appName("BridgeWorkerPlatform").appVersion(1);
         LOG.info("AnandLog: clientInfo: " + clientInfo.toString());
         ClientManager clientManager = new ClientManager.Builder().withConfig(restConf).withClientInfo(clientInfo).withSignIn(signIn).build();
