@@ -92,16 +92,19 @@ public class SpringConfig {
         SignIn signIn = new SignIn().appId(appId).email(email).password(password);
         LOG.info("AnandLog: signIn: " + signIn.toString());
 
-        AuthenticationApi authApi = clientManager.getClient(AuthenticationApi.class);
-        UserSessionInfo session = authApi.signInV4(signIn)
-                .execute()
-                .body();
-        LOG.info("AnandLog: Signed in user ID: " + session.getId());
+        
 
         ClientInfo clientInfo = new ClientInfo().appName("BridgeWorkerPlatform").appVersion(1);
         LOG.info("AnandLog: clientInfo: " + clientInfo.toString());
         ClientManager clientManager = new ClientManager.Builder().withClientInfo(clientInfo).withSignIn(signIn).build();
         LOG.info("AnandLog: clientManager: " + clientManager.toString());
+
+        AuthenticationApi authApi = clientManager.getClient(AuthenticationApi.class);
+        UserSessionInfo session = authApi.signInV4(signIn)
+                .execute()
+                .body();
+        LOG.info("AnandLog: Signed in user ID: " + session.getId());
+        
         return clientManager;
     }
 
