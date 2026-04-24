@@ -24,10 +24,13 @@ import com.amazonaws.services.dynamodbv2.model.KeySchemaElement;
 import com.amazonaws.services.dynamodbv2.model.KeyType;
 import com.amazonaws.services.dynamodbv2.model.ScalarAttributeType;
 import com.amazonaws.services.dynamodbv2.util.TableUtils;
-import com.amazonaws.services.s3.AmazonS3Client;
+import com.amazonaws.ClientConfiguration;
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.AmazonS3ClientBuilder;
+import com.amazonaws.services.sqs.AmazonSQS;
+import com.amazonaws.services.sqs.AmazonSQSClientBuilder;
 import com.amazonaws.services.simpleemail.AmazonSimpleEmailServiceClient;
 import com.amazonaws.services.sns.AmazonSNSClient;
-import com.amazonaws.services.sqs.AmazonSQSClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.LoadingCache;
@@ -230,8 +233,16 @@ public class SpringConfig {
 
     @Bean
     public S3Helper s3Helper() {
+        ClientConfiguration clientConfig = new ClientConfiguration()
+                .withMaxConnections(50)
+                .withConnectionTimeout(10_000)
+                .withSocketTimeout(60_000)
+                .withConnectionTTL(60_000);
+        AmazonS3 s3Client = AmazonS3ClientBuilder.standard()
+                .withClientConfiguration(clientConfig)
+                .build();
         S3Helper s3Helper = new S3Helper();
-        s3Helper.setS3Client(new AmazonS3Client());
+        s3Helper.setS3Client(s3Client);
         return s3Helper;
     }
 
@@ -247,8 +258,16 @@ public class SpringConfig {
 
     @Bean
     public SqsHelper sqsHelper() {
+        ClientConfiguration clientConfig = new ClientConfiguration()
+                .withMaxConnections(50)
+                .withConnectionTimeout(10_000)
+                .withSocketTimeout(60_000)
+                .withConnectionTTL(60_000);
+        AmazonSQS sqsClient = AmazonSQSClientBuilder.standard()
+                .withClientConfiguration(clientConfig)
+                .build();
         SqsHelper sqsHelper = new SqsHelper();
-        sqsHelper.setSqsClient(new AmazonSQSClient());
+        sqsHelper.setSqsClient(sqsClient);
         return sqsHelper;
     }
 
