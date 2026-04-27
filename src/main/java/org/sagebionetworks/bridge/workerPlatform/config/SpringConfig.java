@@ -262,7 +262,8 @@ public class SpringConfig {
                 .withMaxConnections(50)
                 .withConnectionTimeout(10_000)
                 .withSocketTimeout(60_000)
-                .withConnectionTTL(60_000);
+                .withConnectionTTL(60_000)
+                .withMaxErrorRetry(0);
         AmazonSQS sqsClient = AmazonSQSClientBuilder.standard()
                 .withClientConfiguration(clientConfig)
                 .build();
