@@ -6,8 +6,11 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 import javax.annotation.PostConstruct;
 
@@ -206,7 +209,10 @@ public class SpringConfig {
 
     @Bean(name = "generalExecutorService")
     public ExecutorService generalExecutorService() {
-        return Executors.newFixedThreadPool(bridgeConfig().getInt("threadpool.general.count"));
+        int threadCount = bridgeConfig().getInt("threadpool.general.count");
+        return new ThreadPoolExecutor(threadCount, threadCount, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(threadCount),
+                new ThreadPoolExecutor.CallerRunsPolicy());
     }
 
     @Bean(name = "synapseExecutorService")
