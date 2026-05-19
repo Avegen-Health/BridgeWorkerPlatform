@@ -92,29 +92,29 @@ public class SpringConfig {
         String email = config.get("bridge.worker.email");
         String password = config.get("bridge.worker.password");
         String bridge_server = config.get("bridge.server");
-        LOG.info("AnandLog: appId: " + appId);
-        LOG.info("AnandLog: email: " + email);
-        LOG.info("AnandLog: password: " + password);
-        LOG.info("AnandLog: bridge_server: " + bridge_server);
+        LOG.info("BridgeClientManager: appId: " + appId);
+        LOG.info("BridgeClientManager: email: " + email);
+        //LOG.info("AnandLog: password: " + password);
+        LOG.info("BridgeClientManager: bridge_server: " + bridge_server);
         SignIn signIn = new SignIn().appId(appId).email(email).password(password);
-        LOG.info("AnandLog: signIn: " + signIn.toString());
+        //LOG.info("AnandLog: signIn: " + signIn.toString());
 
         
         org.sagebionetworks.bridge.rest.Config restConf = new org.sagebionetworks.bridge.rest.Config();
         restConf.set(org.sagebionetworks.bridge.rest.Config.Props.HOST, bridge_server);
         ClientInfo clientInfo = new ClientInfo().appName("BridgeWorkerPlatform").appVersion(1);
-        LOG.info("AnandLog: clientInfo: " + clientInfo.toString());
+        LOG.info("BridgeClientManager: clientInfo: " + clientInfo.toString());
         ClientManager clientManager = new ClientManager.Builder().withConfig(restConf).withClientInfo(clientInfo).withSignIn(signIn).build();
-        LOG.info("AnandLog: clientManager: " + clientManager.toString());
+        LOG.info("BridgeClientManager: clientManager: " + clientManager.toString());
 
         AuthenticationApi authApi = clientManager.getClient(AuthenticationApi.class);
         try {
             UserSessionInfo session = authApi.signInV4(signIn)
                 .execute()
                 .body();
-            LOG.info("AnandLog: Signed in user ID: " + session.getId());
+            LOG.info("BridgeClientManager: Signed in user ID: " + session.getId());
         } catch (Exception e) {
-            LOG.error("AnandLog: Failed to sign in: " + e.getMessage());
+            LOG.error("BridgeClientManager: Failed to sign in: " + e.getMessage());
         }
 
         return clientManager;

@@ -214,7 +214,7 @@ public class Exporter3WorkerProcessor implements ThrowingConsumer<JsonNode> {
             PollSqsWorkerRetryableException, SynapseException, WorkerException {
         // Check to see that Synapse is up and availabe for read/write. If it isn't, throw an exception, so the
         // PollSqsWorker can re-cycle the request until Synapse is available again.
-        LOG.info("AnandLog: Checking if Synapse is writable");
+        LOG.info("Checking if Synapse is writable");
         if (!synapseHelper.isSynapseWritable()) {
             throw new PollSqsWorkerRetryableException("Synapse is not writable");
         }
@@ -369,8 +369,8 @@ public class Exporter3WorkerProcessor implements ThrowingConsumer<JsonNode> {
         File tempDir = fileHelper.createTempDir();
         try {
             // Step 1: Download from S3.
-            LOG.info("AnandLog: Downloading from S3: appId=" + appId + ", uploadId=" + uploadId);
-            LOG.info("AnandLog: uploadBucket: " + uploadBucket);
+            LOG.info("decryptAndUploadFile: Downloading from S3: appId=" + appId + ", uploadId=" + uploadId);
+            LOG.info("decryptAndUploadFile: uploadBucket: " + uploadBucket);
             File downloadedFile = fileHelper.newFile(tempDir, uploadId);
             s3Helper.downloadS3File(uploadBucket, uploadId, downloadedFile);
 

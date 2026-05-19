@@ -283,7 +283,7 @@ public class BridgeHelper {
 
     /** Gets the app for the given ID. */
     public App getApp(String appId) throws IOException {
-        LOG.info("AnandLog: Getting app for app ID: " + appId);
+        LOG.info("getApp: Getting app for app ID: " + appId);
         
         return clientManager.getClient(ForWorkersApi.class).getApp(appId).execute().body();
     }
