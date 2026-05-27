@@ -32,4 +32,4 @@ deploy:
     prod: elasticbeanstalk-us-east-1-233151233756
   zip-file: target/BridgeWorkerPlatform-1.0.war
   on:
-    all_branches: true
+    branch: prod
