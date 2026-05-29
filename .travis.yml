@@ -3,7 +3,15 @@ language: java
 jdk:
 - openjdk8
 sudo: required
-before_deploy: mvn clean verify
+before_deploy:
+  - mvn clean verify
+  # Bundle WAR + .platform/hooks/ so EB runs the postdeploy hook on each deploy.
+  # Deploying just the WAR (the previous behaviour) excludes .platform/ and the hook never runs.
+  - mkdir -p /tmp/eb-bundle/.platform/hooks/postdeploy
+  - cp target/BridgeWorkerPlatform-1.0.war /tmp/eb-bundle/
+  - cp .platform/hooks/postdeploy/99_cloudwatch_tomcat.sh /tmp/eb-bundle/.platform/hooks/postdeploy/
+  - chmod +x /tmp/eb-bundle/.platform/hooks/postdeploy/99_cloudwatch_tomcat.sh
+  - cd /tmp/eb-bundle && zip -r "$TRAVIS_BUILD_DIR/eb-bundle.zip" . && cd -
 branches:
   only:
   - develop
@@ -30,6 +38,6 @@ deploy:
     develop: elasticbeanstalk-us-east-1-420786776710
     uat: elasticbeanstalk-gvbridge-worker-uat-us-east-1-420786776710
     prod: elasticbeanstalk-us-east-1-233151233756
-  zip-file: target/BridgeWorkerPlatform-1.0.war
+  zip-file: eb-bundle.zip
   on:
     branch: prod
