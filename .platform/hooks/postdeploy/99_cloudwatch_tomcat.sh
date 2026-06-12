@@ -30,7 +30,7 @@ import json, sys
 try:
     d = json.load(open('$BEANSTALK_CFG'))
     lg = d['logs']['logs_collected']['files']['collect_list'][0]['log_group_name']
-    print(lg.split('/')[4])
+    print(lg.split('/')[3])
 except Exception as e:
     sys.exit(1)
 ")
@@ -71,8 +71,11 @@ with open('$TOMCAT_CFG', 'w') as f:
 print('wrote $TOMCAT_CFG')
 "
 
-# Reload CWAgent merging EB's beanstalk config with our Tomcat addition
-$CW_CTL -a fetch-config -m ec2 -s \
-  -c "file:${BEANSTALK_CFG},file:${TOMCAT_CFG}"
+# Append Tomcat log config on top of whatever EB's beanstalk.json already configured.
+# append-config writes tomcat.json into the CWAgent .d/ merge directory and reloads
+# without wiping the beanstalk entries. fetch-config with a comma-separated -c is not
+# supported via shell expansion and fails with "no such file or directory".
+$CW_CTL -a append-config -m ec2 -s \
+  -c "file:${TOMCAT_CFG}"
 
 echo "[99_cloudwatch_tomcat] CWAgent reloaded with Tomcat log streaming enabled"
