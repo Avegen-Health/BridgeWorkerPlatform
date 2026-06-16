@@ -64,6 +64,15 @@ cfg = {
         ]
       }
     }
+  },
+  'metrics': {
+    'metrics_collected': {
+      'disk': {
+        'measurement': ['disk_used_percent'],
+        'metrics_collection_interval': 300,
+        'resources': ['/']
+      }
+    }
   }
 }
 with open('$TOMCAT_CFG', 'w') as f:
