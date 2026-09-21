@@ -6,8 +6,11 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 import javax.annotation.PostConstruct;
 
@@ -24,10 +27,13 @@ import com.amazonaws.services.dynamodbv2.model.KeySchemaElement;
 import com.amazonaws.services.dynamodbv2.model.KeyType;
 import com.amazonaws.services.dynamodbv2.model.ScalarAttributeType;
 import com.amazonaws.services.dynamodbv2.util.TableUtils;
-import com.amazonaws.services.s3.AmazonS3Client;
+import com.amazonaws.ClientConfiguration;
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.AmazonS3ClientBuilder;
+import com.amazonaws.services.sqs.AmazonSQS;
+import com.amazonaws.services.sqs.AmazonSQSClientBuilder;
 import com.amazonaws.services.simpleemail.AmazonSimpleEmailServiceClient;
 import com.amazonaws.services.sns.AmazonSNSClient;
-import com.amazonaws.services.sqs.AmazonSQSClient;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.LoadingCache;
@@ -62,6 +68,8 @@ import org.sagebionetworks.bridge.uploadcomplete.S3EventNotificationCallback;
 import org.sagebionetworks.bridge.worker.ThrowingConsumer;
 import org.sagebionetworks.bridge.workerPlatform.multiplexer.BridgeWorkerPlatformSqsCallback;
 import org.sagebionetworks.bridge.workerPlatform.util.Constants;
+import org.sagebionetworks.bridge.rest.api.AuthenticationApi;
+import org.sagebionetworks.bridge.rest.model.UserSessionInfo;
 
 // These configs get credentials from the default credential chain. For developer desktops, this is ~/.aws/credentials.
 // For EC2 instances, this happens transparently.
@@ -83,10 +91,33 @@ public class SpringConfig {
         String appId = config.get("bridge.worker.appId");
         String email = config.get("bridge.worker.email");
         String password = config.get("bridge.worker.password");
+        String bridge_server = config.get("bridge.server");
+        LOG.info("BridgeClientManager: appId: " + appId);
+        LOG.info("BridgeClientManager: email: " + email);
+        //LOG.info("AnandLog: password: " + password);
+        LOG.info("BridgeClientManager: bridge_server: " + bridge_server);
         SignIn signIn = new SignIn().appId(appId).email(email).password(password);
+        //LOG.info("AnandLog: signIn: " + signIn.toString());
 
+        
+        org.sagebionetworks.bridge.rest.Config restConf = new org.sagebionetworks.bridge.rest.Config();
+        restConf.set(org.sagebionetworks.bridge.rest.Config.Props.HOST, bridge_server);
         ClientInfo clientInfo = new ClientInfo().appName("BridgeWorkerPlatform").appVersion(1);
-        return new ClientManager.Builder().withClientInfo(clientInfo).withSignIn(signIn).build();
+        LOG.info("BridgeClientManager: clientInfo: " + clientInfo.toString());
+        ClientManager clientManager = new ClientManager.Builder().withConfig(restConf).withClientInfo(clientInfo).withSignIn(signIn).build();
+        LOG.info("BridgeClientManager: clientManager: " + clientManager.toString());
+
+        AuthenticationApi authApi = clientManager.getClient(AuthenticationApi.class);
+        try {
+            UserSessionInfo session = authApi.signInV4(signIn)
+                .execute()
+                .body();
+            LOG.info("BridgeClientManager: Signed in user ID: " + session.getId());
+        } catch (Exception e) {
+            LOG.error("BridgeClientManager: Failed to sign in: " + e.getMessage());
+        }
+
+        return clientManager;
     }
 
     @Bean
@@ -178,7 +209,10 @@ public class SpringConfig {
 
     @Bean(name = "generalExecutorService")
     public ExecutorService generalExecutorService() {
-        return Executors.newFixedThreadPool(bridgeConfig().getInt("threadpool.general.count"));
+        int threadCount = bridgeConfig().getInt("threadpool.general.count");
+        return new ThreadPoolExecutor(threadCount, threadCount, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(threadCount),
+                new ThreadPoolExecutor.CallerRunsPolicy());
     }
 
     @Bean(name = "synapseExecutorService")
@@ -205,8 +239,16 @@ public class SpringConfig {
 
     @Bean
     public S3Helper s3Helper() {
+        ClientConfiguration clientConfig = new ClientConfiguration()
+                .withMaxConnections(50)
+                .withConnectionTimeout(10_000)
+                .withSocketTimeout(60_000)
+                .withConnectionTTL(60_000);
+        AmazonS3 s3Client = AmazonS3ClientBuilder.standard()
+                .withClientConfiguration(clientConfig)
+                .build();
         S3Helper s3Helper = new S3Helper();
-        s3Helper.setS3Client(new AmazonS3Client());
+        s3Helper.setS3Client(s3Client);
         return s3Helper;
     }
 
@@ -222,8 +264,17 @@ public class SpringConfig {
 
     @Bean
     public SqsHelper sqsHelper() {
+        ClientConfiguration clientConfig = new ClientConfiguration()
+                .withMaxConnections(50)
+                .withConnectionTimeout(10_000)
+                .withSocketTimeout(60_000)
+                .withConnectionTTL(60_000)
+                .withMaxErrorRetry(0);
+        AmazonSQS sqsClient = AmazonSQSClientBuilder.standard()
+                .withClientConfiguration(clientConfig)
+                .build();
         SqsHelper sqsHelper = new SqsHelper();
-        sqsHelper.setSqsClient(new AmazonSQSClient());
+        sqsHelper.setSqsClient(sqsClient);
         return sqsHelper;
     }
 

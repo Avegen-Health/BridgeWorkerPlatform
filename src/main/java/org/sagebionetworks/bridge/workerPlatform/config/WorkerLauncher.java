@@ -1,6 +1,10 @@
 package org.sagebionetworks.bridge.workerPlatform.config;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+
+import javax.annotation.PreDestroy;
 
 import org.sagebionetworks.bridge.heartbeat.HeartbeatLogger;
 import org.sagebionetworks.bridge.sqs.PollSqsWorker;
@@ -20,6 +24,7 @@ public class WorkerLauncher implements CommandLineRunner {
 
     private HeartbeatLogger heartbeatLogger;
     private Map<String, PollSqsWorker> pollSqsWorkers;
+    private final List<Thread> workerThreads = new ArrayList<>();
 
     @Autowired
     public final void setHeartbeatLogger(HeartbeatLogger heartbeatLogger) {
@@ -44,7 +49,19 @@ public class WorkerLauncher implements CommandLineRunner {
 
         for (Map.Entry<String, PollSqsWorker> entry : pollSqsWorkers.entrySet()) {
             LOG.info("Worker Platform Starting " + entry.getKey() + "...");
-            new Thread(entry.getValue()).start();
+            Thread t = new Thread(entry.getValue());
+            workerThreads.add(t);
+            t.start();
+        }
+    }
+
+    // Interrupt polling threads during Spring context shutdown so they stop before the AWS SDK shutdown hook
+    // closes connection pools, preventing the "Connection pool shut down" error storm on restart.
+    @PreDestroy
+    public void shutdown() {
+        LOG.info("Worker Platform shutting down polling threads...");
+        for (Thread t : workerThreads) {
+            t.interrupt();
         }
     }
 }

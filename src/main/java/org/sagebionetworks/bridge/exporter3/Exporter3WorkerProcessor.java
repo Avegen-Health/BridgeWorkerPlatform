@@ -195,6 +195,13 @@ public class Exporter3WorkerProcessor implements ThrowingConsumer<JsonNode> {
             // Catch and rethrow exception. The extra logging statement makes it easier to do log analysis.
             LOG.error("Exception thrown for export request for app " + request.getAppId() + " record " +
                     request.getRecordId(), ex);
+            // S3 connection pool can be shut down transiently (e.g. credential refresh race). Treat as retryable.
+            if (ex instanceof IllegalStateException && ex.getMessage() != null &&
+                    ex.getMessage().contains("Connection pool shut down")) {
+                LOG.warn("S3 connection pool shut down for app " + request.getAppId() + " record " +
+                        request.getRecordId() + "; retrying via SQS redelivery", ex);
+                throw new PollSqsWorkerRetryableException(ex.getMessage(), ex);
+            }
             throw ex;
         } finally {
             LOG.info("Export request took " + requestStopwatch.elapsed(TimeUnit.SECONDS) + " seconds for app " +
@@ -207,6 +214,7 @@ public class Exporter3WorkerProcessor implements ThrowingConsumer<JsonNode> {
             PollSqsWorkerRetryableException, SynapseException, WorkerException {
         // Check to see that Synapse is up and availabe for read/write. If it isn't, throw an exception, so the
         // PollSqsWorker can re-cycle the request until Synapse is available again.
+        LOG.info("Checking if Synapse is writable");
         if (!synapseHelper.isSynapseWritable()) {
             throw new PollSqsWorkerRetryableException("Synapse is not writable");
         }
@@ -361,6 +369,8 @@ public class Exporter3WorkerProcessor implements ThrowingConsumer<JsonNode> {
         File tempDir = fileHelper.createTempDir();
         try {
             // Step 1: Download from S3.
+            LOG.info("decryptAndUploadFile: Downloading from S3: appId=" + appId + ", uploadId=" + uploadId);
+            LOG.info("decryptAndUploadFile: uploadBucket: " + uploadBucket);
             File downloadedFile = fileHelper.newFile(tempDir, uploadId);
             s3Helper.downloadS3File(uploadBucket, uploadId, downloadedFile);
 
