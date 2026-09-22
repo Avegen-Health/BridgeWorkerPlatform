@@ -1,10 +1,16 @@
 package org.sagebionetworks.bridge.addf.store;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
 
 import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.model.GetObjectRequest;
+import com.amazonaws.services.s3.model.ListObjectsV2Request;
+import com.amazonaws.services.s3.model.ListObjectsV2Result;
 import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.amazonaws.services.s3.model.PutObjectRequest;
+import com.amazonaws.services.s3.model.S3ObjectSummary;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,6 +35,9 @@ public class ExportStoreClient {
     private static final Logger LOG = LoggerFactory.getLogger(ExportStoreClient.class);
 
     static final String ROOT_PREFIX = "biaffect-3/";
+    static final String STAGING_PREFIX = ROOT_PREFIX + "_staging/";
+    static final String TOMBSTONE_PREFIX = ROOT_PREFIX + "_tombstone/";
+    static final String CURRENT_TABLES_PREFIX = "current/tables/";
     static final String CONFIG_KEY_EXPORTSTORE_BUCKET = "addf.exportstore.bucket";
 
     private AmazonS3 s3Client;
@@ -97,6 +106,85 @@ public class ExportStoreClient {
         putFile(key, archiveFile);
         LOG.info("ADDF raw stored: {}", key);
         return relativeKey;
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Publish-side read/write (§4.3). The publish worker is the SOLE writer of every consolidated table file; these
+    // helpers let SnapshotDeltaBuilder list the staged per-record objects, read them back, and coalesce them into the
+    // consolidated targets. All keys returned by the list methods are full bucket keys (they include ROOT_PREFIX).
+    // ---------------------------------------------------------------------------------------------------------------
+
+    /** The consolidated single-file key for a table, relative to the bucket root: {@code biaffect-3/current/tables/<table>.parquet}. */
+    public String consolidatedKey(String table) {
+        return ROOT_PREFIX + CURRENT_TABLES_PREFIX + table + ".parquet";
+    }
+
+    /** The keyboard part-file key for a month + publish label: {@code biaffect-3/keyboard_sessions/month=YYYY-MM/part-<snapshotDate>.parquet} (§4.3.2). */
+    public String keyboardPartKey(String month, String snapshotDate) {
+        return ROOT_PREFIX + "keyboard_sessions/month=" + month + "/part-" + snapshotDate + ".parquet";
+    }
+
+    /** List the staged per-record object keys under {@code _staging/<table>/} (all stage-date partitions), paged. */
+    public List<String> listStaged(String table) {
+        return listKeys(STAGING_PREFIX + table + "/");
+    }
+
+    /** List tombstoned health codes (the basename under {@code _tombstone/}) — participants withdrawn since last publish (§3b.3). */
+    public List<String> listTombstonedHealthCodes() {
+        List<String> healthCodes = new ArrayList<>();
+        for (String key : listKeys(TOMBSTONE_PREFIX)) {
+            String hc = key.substring(TOMBSTONE_PREFIX.length());
+            if (!hc.isEmpty()) {
+                healthCodes.add(hc);
+            }
+        }
+        return healthCodes;
+    }
+
+    private List<String> listKeys(String prefix) {
+        List<String> keys = new ArrayList<>();
+        ListObjectsV2Request req = new ListObjectsV2Request().withBucketName(bucket).withPrefix(prefix);
+        ListObjectsV2Result result;
+        do {
+            result = s3Client.listObjectsV2(req);
+            for (S3ObjectSummary summary : result.getObjectSummaries()) {
+                // Skip the prefix "folder" placeholder object, if any.
+                if (!summary.getKey().endsWith("/")) {
+                    keys.add(summary.getKey());
+                }
+            }
+            req.setContinuationToken(result.getNextContinuationToken());
+        } while (result.isTruncated());
+        return keys;
+    }
+
+    /** True when the consolidated file for {@code table} already exists (an earlier snapshot wrote it). */
+    public boolean consolidatedExists(String table) {
+        return s3Client.doesObjectExist(bucket, consolidatedKey(table));
+    }
+
+    /** Download an object (by full bucket key) to {@code dest}; returns {@code dest}. */
+    public File download(String key, File dest) {
+        s3Client.getObject(new GetObjectRequest(bucket, key), dest);
+        return dest;
+    }
+
+    /** Write a local Parquet file to a full bucket key (SSE-AES256), overwriting in place. */
+    public void putObject(String key, File file) {
+        putFile(key, file);
+        LOG.info("ADDF published object: {}", key);
+    }
+
+    /** Delete a batch of objects (by full bucket key) — used to clear consumed staging and tombstone markers. */
+    public void deleteObjects(List<String> keys) {
+        for (String key : keys) {
+            s3Client.deleteObject(bucket, key);
+        }
+    }
+
+    /** Delete a single tombstone marker after the participant's rows have been compacted this publish. */
+    public void deleteTombstone(String healthCode) {
+        s3Client.deleteObject(bucket, TOMBSTONE_PREFIX + healthCode);
     }
 
     private void putFile(String key, File file) {

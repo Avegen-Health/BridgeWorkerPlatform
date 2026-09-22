@@ -65,6 +65,34 @@ public class ParquetRowWriter {
         return outputFile;
     }
 
+    /**
+     * Write many rows for one {@code table} as a single multi-row Parquet file — the publish worker's coalesce step
+     * (§4.3). All rows must target the same table; each is coerced against {@link AddfTables} exactly like the
+     * single-row {@link #write} path. An empty {@code rows} list still writes a valid zero-row Parquet file (a table
+     * that was emptied by tombstones legitimately becomes empty).
+     */
+    public File writeAll(String table, List<TableRow> rows, File outputFile) throws IOException {
+        Schema schema = AddfTables.avroSchemaFor(table);
+        List<Column> columns = AddfTables.columnsFor(table);
+
+        Path path = new Path(outputFile.getAbsolutePath());
+        try (ParquetWriter<GenericRecord> writer = AvroParquetWriter.<GenericRecord>builder(path)
+                .withSchema(schema)
+                .withConf(newConf())
+                .withCompressionCodec(CODEC)
+                .withWriteMode(ParquetFileWriter.Mode.OVERWRITE)
+                .build()) {
+            for (TableRow row : rows) {
+                GenericRecord record = new GenericData.Record(schema);
+                for (Column column : columns) {
+                    record.put(column.getName(), coerce(column.getType(), row.get(column.getName())));
+                }
+                writer.write(record);
+            }
+        }
+        return outputFile;
+    }
+
     private static Object coerce(ColumnType type, Object value) {
         if (value == null) {
             return null;
