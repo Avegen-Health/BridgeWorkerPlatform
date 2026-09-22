@@ -1,16 +1,24 @@
 package org.sagebionetworks.bridge.addf.store;
 
+import static org.mockito.Matchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
 import java.io.File;
+import java.util.List;
 
 import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.model.GetObjectRequest;
+import com.amazonaws.services.s3.model.ListObjectsV2Request;
+import com.amazonaws.services.s3.model.ListObjectsV2Result;
 import com.amazonaws.services.s3.model.PutObjectRequest;
+import com.amazonaws.services.s3.model.S3ObjectSummary;
+import com.google.common.collect.ImmutableList;
 import org.mockito.ArgumentCaptor;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
@@ -94,5 +102,76 @@ public class ExportStoreClientTest {
                 "raw/2026-08-15/rec-1-weird_name__.zip");
         assertEquals(client.putRaw("2026-08-15", "rec-2", null, new File("a.zip")),
                 "raw/2026-08-15/rec-2-unknown.zip");
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Publish-side IO (Phase 4).
+    // ------------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void consolidatedAndKeyboardKeys() {
+        assertEquals(client.consolidatedKey("phq9"), "biaffect-3/current/tables/phq9.parquet");
+        assertEquals(client.keyboardPartKey("2026-08", "2026-09-22"),
+                "biaffect-3/keyboard_sessions/month=2026-08/part-2026-09-22.parquet");
+    }
+
+    @Test
+    public void consolidatedExistsDelegates() {
+        when(mockS3.doesObjectExist(BUCKET, "biaffect-3/current/tables/phq9.parquet")).thenReturn(true);
+        assertTrue(client.consolidatedExists("phq9"));
+        assertFalse(client.consolidatedExists("evening_log"));
+    }
+
+    @Test
+    public void listStagedReturnsKeysAndSkipsFolderPlaceholders() {
+        ListObjectsV2Result result = new ListObjectsV2Result();
+        result.getObjectSummaries().add(summary("biaffect-3/_staging/phq9/2026-09-22/rec-1.parquet"));
+        result.getObjectSummaries().add(summary("biaffect-3/_staging/phq9/2026-09-22/rec-2.parquet"));
+        result.getObjectSummaries().add(summary("biaffect-3/_staging/phq9/")); // folder placeholder -> skipped
+        when(mockS3.listObjectsV2(any(ListObjectsV2Request.class))).thenReturn(result);
+
+        List<String> keys = client.listStaged("phq9");
+        assertEquals(keys, ImmutableList.of("biaffect-3/_staging/phq9/2026-09-22/rec-1.parquet",
+                "biaffect-3/_staging/phq9/2026-09-22/rec-2.parquet"));
+    }
+
+    @Test
+    public void listTombstonedHealthCodesStripsPrefix() {
+        ListObjectsV2Result result = new ListObjectsV2Result();
+        result.getObjectSummaries().add(summary("biaffect-3/_tombstone/hc-1"));
+        result.getObjectSummaries().add(summary("biaffect-3/_tombstone/hc-2"));
+        when(mockS3.listObjectsV2(any(ListObjectsV2Request.class))).thenReturn(result);
+
+        assertEquals(client.listTombstonedHealthCodes(), ImmutableList.of("hc-1", "hc-2"));
+    }
+
+    @Test
+    public void downloadDelegatesToGetObject() {
+        File dest = new File("out.parquet");
+        assertEquals(client.download("biaffect-3/current/tables/phq9.parquet", dest), dest);
+        verify(mockS3).getObject(any(GetObjectRequest.class), org.mockito.Matchers.eq(dest));
+    }
+
+    @Test
+    public void putObjectWritesToKey() {
+        client.putObject("biaffect-3/current/tables/phq9.parquet", new File("phq9.parquet"));
+        PutObjectRequest req = capturePut();
+        assertEquals(req.getKey(), "biaffect-3/current/tables/phq9.parquet");
+    }
+
+    @Test
+    public void deleteObjectsAndTombstone() {
+        client.deleteObjects(ImmutableList.of("k1", "k2"));
+        verify(mockS3).deleteObject(BUCKET, "k1");
+        verify(mockS3).deleteObject(BUCKET, "k2");
+
+        client.deleteTombstone("hc-9");
+        verify(mockS3).deleteObject(BUCKET, "biaffect-3/_tombstone/hc-9");
+    }
+
+    private static S3ObjectSummary summary(String key) {
+        S3ObjectSummary summary = new S3ObjectSummary();
+        summary.setKey(key);
+        return summary;
     }
 }

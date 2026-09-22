@@ -345,6 +345,28 @@
                 </exclusion>
             </exclusions>
         </dependency>
+
+        <!--
+            ADDF export (Phase 4): Azure Blob transport for the daily publish.
+
+            Decision (implementation-plan §4.4.2): the in-JVM azure-storage-blob SDK, NOT the azcopy CLI. BWP runs on
+            the managed Corretto 8 / Tomcat EB platform (not Docker), so a native binary would need an .ebextensions
+            install + PATH management; the SDK is a plain Maven jar (same class of dependency as parquet-avro above)
+            and removes the only novel native runtime dependency the plan otherwise carried. SnapshotDeltaBuilder
+            computes the exact changed-file set, so azcopy sync's recursive self-heal is unnecessary — a targeted
+            per-blob upload replaces it.
+
+            Version 12.20.x is pinned deliberately: it pairs with azure-core built against the Jackson 2.13 baseline,
+            matching the project's jackson-databind ${jackson-databind.version}. Newer azure-storage-blob (12.25+) pulls
+            a newer Jackson baseline that could clash with the project's pin. Jackson is NOT excluded here: azure-core
+            genuinely needs jackson-dataformat-xml/jsr310, and Maven mediation already resolves jackson-databind to the
+            project's directly-declared 2.13.5 — so all Jackson modules stay on the 2.13 line and agree.
+        -->
+        <dependency>
+            <groupId>com.azure</groupId>
+            <artifactId>azure-storage-blob</artifactId>
+            <version>12.20.3</version>
+        </dependency>
     </dependencies>
 
     <repositories>

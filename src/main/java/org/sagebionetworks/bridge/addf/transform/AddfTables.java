@@ -223,6 +223,24 @@ public final class AddfTables {
     }
 
     /**
+     * The natural key column for a table's grain: {@code record_id} for the 6 activity tables + {@code file_records}
+     * (1 row per uploaded record), {@code health_code} for the participant-keyed tables ({@code demographics},
+     * {@code participant_versions}, {@code participants_current}). Used by the publish worker to upsert coalesced rows.
+     * Note {@code participant_versions} additionally keys on {@code participant_version} — the publish builder combines
+     * the two explicitly; this returns the row-identity column shared by the participant-keyed family.
+     */
+    public static String keyColumn(String table) {
+        switch (table) {
+            case DEMOGRAPHICS:
+            case PARTICIPANT_VERSIONS:
+            case PARTICIPANTS_CURRENT:
+                return "health_code";
+            default:
+                return "record_id";
+        }
+    }
+
+    /**
      * Build the Avro schema for a table: one nullable field per column, in contract order. Cached construction is left
      * to the caller ({@link ParquetRowWriter} builds once per write, which is negligible next to the S3 round-trip).
      */
