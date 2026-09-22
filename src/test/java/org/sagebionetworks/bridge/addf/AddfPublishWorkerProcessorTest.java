@@ -18,7 +18,7 @@ import org.testng.annotations.Test;
 
 import org.sagebionetworks.bridge.addf.azure.BlobTransport;
 import org.sagebionetworks.bridge.addf.publish.PublishMarker;
-import org.sagebionetworks.bridge.addf.publish.PublishedBlob;
+import org.sagebionetworks.bridge.addf.publish.SnapshotDelta;
 import org.sagebionetworks.bridge.addf.publish.SnapshotDeltaBuilder;
 import org.sagebionetworks.bridge.config.Config;
 import org.sagebionetworks.bridge.file.FileHelper;
@@ -48,7 +48,10 @@ public class AddfPublishWorkerProcessorTest {
         tempDir = new File("/tmp/addf-publish-worker-test");
 
         when(mockFileHelper.createTempDir()).thenReturn(tempDir);
-        when(mockBuilder.build(anyString(), any(File.class))).thenReturn(ImmutableList.<PublishedBlob>of());
+        when(mockBuilder.build(anyString(), any(File.class))).thenReturn(
+                new SnapshotDelta(ImmutableList.of(), ImmutableList.of(), ImmutableList.of()));
+        // Default: not yet published, so publish() proceeds.
+        when(mockMarker.isPublished(anyString())).thenReturn(false);
 
         processor = new AddfPublishWorkerProcessor();
         processor.setBridgeConfig(mockConfig);
@@ -63,17 +66,52 @@ public class AddfPublishWorkerProcessorTest {
     }
 
     @Test
-    public void enabledRunsBuildUploadMarkInOrder() throws Exception {
+    public void enabledRunsBuildUploadCommitMarkInOrder() throws Exception {
         when(mockConfig.get("addf.publish.enabled")).thenReturn("true");
 
         processor.accept(body("{\"snapshotDate\":\"" + SNAPSHOT_DATE + "\"}"));
 
+        // Crash-safety ordering: build -> upload -> commit (retire staging/tombstones) -> mark. commit MUST follow the
+        // upload so an upload failure leaves staging intact for an idempotent replay.
         InOrder inOrder = Mockito.inOrder(mockBuilder, mockTransport, mockMarker);
         inOrder.verify(mockBuilder).build(eq(SNAPSHOT_DATE), eq(tempDir));
         inOrder.verify(mockTransport).upload(any());
+        inOrder.verify(mockBuilder).commit(any(SnapshotDelta.class));
         inOrder.verify(mockMarker).mark(SNAPSHOT_DATE);
         // Temp dir always cleaned.
         verify(mockFileHelper).deleteDirRecursively(tempDir);
+    }
+
+    @Test
+    public void uploadFailureLeavesStagingUncommittedAndUnmarked() throws Exception {
+        when(mockConfig.get("addf.publish.enabled")).thenReturn("true");
+        Mockito.doThrow(new RuntimeException("azure blob 503")).when(mockTransport).upload(any());
+
+        try {
+            processor.accept(body("{\"snapshotDate\":\"" + SNAPSHOT_DATE + "\"}"));
+        } catch (Exception expected) {
+            // mapped to WorkerException by accept(); the message is redelivered and the day replays.
+        }
+
+        // The failure must NOT consume staging (commit) or claim success (mark) — that is the crash-safety guarantee.
+        verify(mockBuilder, never()).commit(any(SnapshotDelta.class));
+        verify(mockMarker, never()).mark(anyString());
+        // Temp dir still cleaned even on the failure path.
+        verify(mockFileHelper).deleteDirRecursively(tempDir);
+    }
+
+    @Test
+    public void alreadyPublishedSkips() throws Exception {
+        when(mockConfig.get("addf.publish.enabled")).thenReturn("true");
+        when(mockMarker.isPublished(SNAPSHOT_DATE)).thenReturn(true);
+
+        processor.accept(body("{\"snapshotDate\":\"" + SNAPSHOT_DATE + "\"}"));
+
+        // Marker present => the snapshot already fully published; do no work and don't re-mark.
+        verify(mockBuilder, never()).build(anyString(), any(File.class));
+        verify(mockTransport, never()).upload(any());
+        verify(mockBuilder, never()).commit(any(SnapshotDelta.class));
+        verify(mockMarker, never()).mark(anyString());
     }
 
     @Test

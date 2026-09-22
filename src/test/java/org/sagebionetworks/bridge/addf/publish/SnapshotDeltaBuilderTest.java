@@ -98,11 +98,24 @@ public class SnapshotDeltaBuilderTest {
         return row;
     }
 
+    /** Capture the single deleteObjects batch commit() issues and assert it contains each expected staging key. */
+    private void assertCommitDeleted(String... expectedKeys) {
+        ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
+        verify(mockStore).deleteObjects(captor.capture());
+        List<?> deleted = captor.getValue();
+        for (String key : expectedKeys) {
+            assertTrue(deleted.contains(key), "expected commit to delete staging key " + key + " but got " + deleted);
+        }
+    }
+
     @Test
     public void emptyEverythingProducesNoDelta() throws Exception {
-        List<PublishedBlob> delta = builder.build(SNAPSHOT_DATE, tempDir);
-        assertTrue(delta.isEmpty());
+        SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
+        assertTrue(delta.getBlobs().isEmpty());
         verify(mockWriter, never()).writeAll(anyString(), anyList(), any(File.class));
+        // Nothing consumed: commit must not issue a delete batch.
+        builder.commit(delta);
+        verify(mockStore, never()).deleteObjects(anyList());
     }
 
     @Test
@@ -110,13 +123,15 @@ public class SnapshotDeltaBuilderTest {
         when(mockStore.listStaged(AddfTables.PARTICIPANT_VERSIONS)).thenReturn(ImmutableList.of("stagedV"));
         rowsByFileName.put("participant_versions-staged-0.parquet", ImmutableList.of(versionRow("hc-1", 2)));
 
-        List<PublishedBlob> delta = builder.build(SNAPSHOT_DATE, tempDir);
+        SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
         // participant_versions + participants_current both (re)written.
         verify(mockWriter).writeAll(eq(AddfTables.PARTICIPANT_VERSIONS), anyList(), any(File.class));
         verify(mockWriter).writeAll(eq(AddfTables.PARTICIPANTS_CURRENT), anyList(), any(File.class));
-        assertEquals(delta.size(), 2);
-        // Consumed the staged version object.
+        assertEquals(delta.getBlobs().size(), 2);
+        // build() does NOT delete staging; commit() does, only after the (mocked) upload would have run.
+        verify(mockStore, never()).deleteObjects(anyList());
+        builder.commit(delta);
         verify(mockStore).deleteObjects(ImmutableList.of("stagedV"));
     }
 
@@ -143,10 +158,12 @@ public class SnapshotDeltaBuilderTest {
         when(mockStore.listStaged(AddfTables.PHQ9)).thenReturn(ImmutableList.of("p"));
         rowsByFileName.put("phq9-staged-0.parquet", ImmutableList.of(activityRow(AddfTables.PHQ9, "rec-1", "hc-1", 2L)));
 
-        builder.build(SNAPSHOT_DATE, tempDir);
+        SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
         verify(mockWriter).writeAll(eq(AddfTables.PHQ9), anyList(), any(File.class));
-        verify(mockStore).deleteObjects(ImmutableList.of("p"));
+        // Consumed keys are aggregated across tables (version "v" + phq9 "p") into one commit batch.
+        builder.commit(delta);
+        assertCommitDeleted("p");
     }
 
     @Test
@@ -155,13 +172,14 @@ public class SnapshotDeltaBuilderTest {
         when(mockStore.listStaged(AddfTables.PHQ9)).thenReturn(ImmutableList.of("p"));
         rowsByFileName.put("phq9-staged-0.parquet", ImmutableList.of(activityRow(AddfTables.PHQ9, "rec-1", "hc-1", 9L)));
 
-        List<PublishedBlob> delta = builder.build(SNAPSHOT_DATE, tempDir);
+        SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
-        assertTrue(delta.isEmpty());
+        assertTrue(delta.getBlobs().isEmpty());
         verify(mockWriter, never()).writeAll(eq(AddfTables.PHQ9), anyList(), any(File.class));
-        // Deferred: the staged object is NOT consumed/deleted (it retries next snapshot). Empty-list deletes for
-        // every table still happen; the point is the orphan key "p" is never among them.
-        verify(mockStore, never()).deleteObjects(ImmutableList.of("p"));
+        // Deferred: the orphan staged object is NOT consumed, so it is absent from the commit batch and retries next
+        // snapshot. Nothing else is consumed either, so commit issues no delete at all.
+        builder.commit(delta);
+        verify(mockStore, never()).deleteObjects(anyList());
     }
 
     @Test
@@ -170,10 +188,11 @@ public class SnapshotDeltaBuilderTest {
         rowsByFileName.put("phq9-staged-0.parquet",
                 ImmutableList.of(activityRow(AddfTables.PHQ9, "rec-1", "hc-1", null)));
 
-        builder.build(SNAPSHOT_DATE, tempDir);
+        SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
         // Null participant_version has no FK to check — it is written through.
         verify(mockWriter).writeAll(eq(AddfTables.PHQ9), anyList(), any(File.class));
+        builder.commit(delta);
         verify(mockStore).deleteObjects(ImmutableList.of("p"));
     }
 
@@ -185,7 +204,7 @@ public class SnapshotDeltaBuilderTest {
                 activityRow(AddfTables.PHQ9, "rec-1", "hc-x", 2L),
                 activityRow(AddfTables.PHQ9, "rec-2", "hc-2", 2L)));
 
-        builder.build(SNAPSHOT_DATE, tempDir);
+        SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
         ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
         verify(mockWriter).writeAll(eq(AddfTables.PHQ9), captor.capture(), any(File.class));
@@ -193,6 +212,9 @@ public class SnapshotDeltaBuilderTest {
         List<TableRow> written = captor.getValue();
         assertEquals(written.size(), 1);
         assertEquals(written.get(0).get("record_id"), "rec-2");
+        // Tombstone markers are cleared by commit(), not build().
+        verify(mockStore, never()).deleteTombstone(anyString());
+        builder.commit(delta);
         verify(mockStore).deleteTombstone("hc-x");
     }
 
@@ -206,12 +228,14 @@ public class SnapshotDeltaBuilderTest {
         kb.put("session_start", "2026-08-15T10:30:00.000Z");
         rowsByFileName.put("keyboard_sessions-staged-0.parquet", ImmutableList.of(kb));
 
-        List<PublishedBlob> delta = builder.build(SNAPSHOT_DATE, tempDir);
+        SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
         verify(mockWriter).writeAll(eq(AddfTables.KEYBOARD_SESSIONS), anyList(), any(File.class));
-        boolean hasKeyboardPart = delta.stream().anyMatch(
+        boolean hasKeyboardPart = delta.getBlobs().stream().anyMatch(
                 b -> b.getKey().equals("biaffect-3/keyboard_sessions/month=2026-08/part-2026-09-22.parquet"));
         assertTrue(hasKeyboardPart, "expected a dated keyboard month part in the delta");
-        verify(mockStore).deleteObjects(ImmutableList.of("k"));
+        // Consumed keys aggregate across tables (version "v" + keyboard "k") into one commit batch.
+        builder.commit(delta);
+        assertCommitDeleted("k");
     }
 }

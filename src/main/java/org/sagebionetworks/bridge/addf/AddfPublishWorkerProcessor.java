@@ -2,7 +2,6 @@ package org.sagebionetworks.bridge.addf;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -14,7 +13,7 @@ import org.springframework.stereotype.Component;
 
 import org.sagebionetworks.bridge.addf.azure.BlobTransport;
 import org.sagebionetworks.bridge.addf.publish.PublishMarker;
-import org.sagebionetworks.bridge.addf.publish.PublishedBlob;
+import org.sagebionetworks.bridge.addf.publish.SnapshotDelta;
 import org.sagebionetworks.bridge.addf.publish.SnapshotDeltaBuilder;
 import org.sagebionetworks.bridge.addf.transform.AddfDateUtils;
 import org.sagebionetworks.bridge.config.Config;
@@ -119,13 +118,24 @@ public class AddfPublishWorkerProcessor implements ThrowingConsumer<JsonNode> {
     // process()) so the accept() multi-catch that maps them is legal; today only IOException is actually thrown here.
     void publish(String snapshotDate) throws IOException, PollSqsWorkerBadRequestException,
             PollSqsWorkerRetryableException, WorkerException {
+        // Idempotency short-circuit: a duplicate delivery for a snapshot already fully published (marker present) is a
+        // no-op. The marker is written only after a confirmed upload, so its presence means the day genuinely completed.
+        if (publishMarker.isPublished(snapshotDate)) {
+            LOG.info("ADDF publish already completed for snapshotDate=" + snapshotDate + " (marker present); skipping");
+            return;
+        }
+
         File tempDir = fileHelper.createTempDir();
         try {
-            List<PublishedBlob> delta = snapshotDeltaBuilder.build(snapshotDate, tempDir);
-            // Upload to Azure staging BEFORE marking done — a crash here leaves no marker, so the day re-runs cleanly.
-            blobTransport.upload(delta);
+            SnapshotDelta delta = snapshotDeltaBuilder.build(snapshotDate, tempDir);
+            // Upload to Azure staging BEFORE consuming staging or writing the marker: on a crash/upload failure here the
+            // staging objects and tombstones survive (build() only wrote the idempotent consolidated files), so the day
+            // replays and rebuilds the identical delta instead of silently dropping it from the Azure mirror (§4.5).
+            blobTransport.upload(delta.getBlobs());
+            // Upload confirmed: now retire consumed staging + clear tombstone markers, then write the done-marker.
+            snapshotDeltaBuilder.commit(delta);
             publishMarker.mark(snapshotDate);
-            LOG.info("ADDF publish succeeded snapshotDate=" + snapshotDate + " blobs=" + delta.size());
+            LOG.info("ADDF publish succeeded snapshotDate=" + snapshotDate + " blobs=" + delta.getBlobs().size());
         } finally {
             try {
                 fileHelper.deleteDirRecursively(tempDir);

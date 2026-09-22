@@ -29,6 +29,11 @@ public class BlobTransport {
     // Guard against publishing before ADDI has supplied the real container (the .conf placeholder default).
     private static final String PLACEHOLDER = "PLACEHOLDER";
 
+    // Bounded per-blob retry: absorb transient blob-store blips so a single flaky upload doesn't fail the whole day
+    // (which would otherwise redeliver the message and replay the entire snapshot). A daily off-peak job can afford it.
+    static final int MAX_ATTEMPTS = 3;
+    static final long BACKOFF_MILLIS = 1000L;
+
     private BlobCredentialProvider credentialProvider;
 
     @Autowired
@@ -39,8 +44,9 @@ public class BlobTransport {
     /**
      * Upload every {@link PublishedBlob} in the delta to the staging container at its {@link PublishedBlob#getKey()}
      * (which mirrors the export-store delivery tree). Sequential — publish is a daily, I/O-bound, off-peak job of
-     * minutes; per-blob throughput tuning (bounded pool) is added only on measured need (§4.4.2). Throws on the first
-     * failure so the worker can map it to a retryable and the whole day re-runs idempotently.
+     * minutes; per-blob throughput tuning (bounded pool) is added only on measured need (§4.4.2). Each blob is retried
+     * up to {@link #MAX_ATTEMPTS} times to absorb transient blips; if a blob still fails it throws, so the worker can
+     * map it to a retryable and the whole day re-runs idempotently.
      */
     public void upload(List<PublishedBlob> delta) {
         if (delta.isEmpty()) {
@@ -49,14 +55,49 @@ public class BlobTransport {
         }
         BlobContainerClient containerClient = buildContainerClient();
         for (PublishedBlob blob : delta) {
-            containerClient.getBlobClient(blob.getKey())
-                    .uploadFromFile(blob.getLocalFile().getAbsolutePath(), true);
-            LOG.info("ADDF publish: uploaded blob {}", blob.getKey());
+            uploadOne(containerClient, blob);
         }
         LOG.info("ADDF publish: uploaded {} blob(s) to staging container", delta.size());
     }
 
-    private BlobContainerClient buildContainerClient() {
+    /** Upload a single blob with a bounded retry + linear backoff; rethrows the last failure once attempts run out. */
+    private void uploadOne(BlobContainerClient containerClient, PublishedBlob blob) {
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                doUpload(containerClient, blob);
+                LOG.info("ADDF publish: uploaded blob {}{}", blob.getKey(),
+                        attempt > 1 ? " (attempt " + attempt + ")" : "");
+                return;
+            } catch (RuntimeException ex) {
+                last = ex;
+                LOG.warn("ADDF publish: upload attempt {}/{} failed for blob {}: {}",
+                        attempt, MAX_ATTEMPTS, blob.getKey(), ex.getMessage());
+                if (attempt < MAX_ATTEMPTS) {
+                    sleepBackoff(attempt);
+                }
+            }
+        }
+        throw last;
+    }
+
+    /** The single real SDK call — package-private so tests can intercept it without a live Azure container. */
+    void doUpload(BlobContainerClient containerClient, PublishedBlob blob) {
+        containerClient.getBlobClient(blob.getKey())
+                .uploadFromFile(blob.getLocalFile().getAbsolutePath(), true);
+    }
+
+    /** Package-private so tests can override to a no-op (skip the real sleep between retry attempts). */
+    void sleepBackoff(int attempt) {
+        try {
+            Thread.sleep(BACKOFF_MILLIS * attempt);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted during ADDF blob-upload backoff", ie);
+        }
+    }
+
+    BlobContainerClient buildContainerClient() {
         String containerUrl = credentialProvider.getContainerUrl();
         String sasToken = credentialProvider.getSasToken();
         if (containerUrl == null || containerUrl.isEmpty() || containerUrl.contains(PLACEHOLDER)) {

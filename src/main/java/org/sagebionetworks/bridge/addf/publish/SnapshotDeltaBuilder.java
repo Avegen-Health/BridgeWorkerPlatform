@@ -4,6 +4,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -34,12 +35,19 @@ import org.sagebionetworks.bridge.file.FileHelper;
  *
  * <p><b>Cutoff (§4.3.3):</b> each table's staging is listed once at the moment it is processed; {@code snapshotDate}
  * only labels the run (and names keyboard part files, §4.3.2) — it is not a row filter. Objects staged after the
- * listing roll to the next publish. Consumed staging objects are deleted after their consolidated file is written;
- * deferred (orphan) objects are left in place.</p>
+ * listing roll to the next publish. Consumed staging objects are <b>collected</b>, not deleted, during {@link #build};
+ * {@link #commit} deletes them only after the worker confirms the Azure upload. Deferred (orphan) objects are left in
+ * place.</p>
  *
  * <p><b>Withdrawal/tombstone (§3b.3):</b> health codes marked in {@code _tombstone/} are compacted out of every
- * single-file/participant-keyed table this run, then their markers are cleared. (Historical month-partitioned keyboard
- * parts are compacted by the optional periodic compaction pass of §4.3.2, not this daily publish.)</p>
+ * single-file/participant-keyed table this run; their markers are cleared by {@link #commit} (again, post-upload).
+ * (Historical month-partitioned keyboard parts are compacted by the optional periodic compaction pass of §4.3.2, not
+ * this daily publish.)</p>
+ *
+ * <p><b>Crash-safety (§4.5):</b> {@code build} writes the consolidated files (idempotent overwrite-in-place) but does
+ * not consume staging or clear tombstones — that is {@code commit}'s job, and the worker calls {@code commit} only
+ * after the Azure upload confirms. A crash or upload failure before {@code commit} leaves staging + tombstones intact,
+ * so the whole day replays and rebuilds the identical delta rather than silently losing it from the Azure mirror.</p>
  */
 @Component
 public class SnapshotDeltaBuilder {
@@ -77,11 +85,15 @@ public class SnapshotDeltaBuilder {
 
     /**
      * Build the snapshot: coalesce all staged rows into their consolidated targets in the export store and return the
-     * set of files that changed (each paired with its local temp file for the Azure upload). {@code tempDir} is owned
-     * by the caller (the publish worker), which cleans it up after the upload.
+     * set of files that changed (each paired with its local temp file for the Azure upload), together with the staging
+     * keys and tombstones to retire once that upload confirms. {@code tempDir} is owned by the caller (the publish
+     * worker), which cleans it up after the upload. This method does <b>not</b> delete staging or clear tombstones —
+     * see {@link #commit}.
      */
-    public List<PublishedBlob> build(String snapshotDate, File tempDir) throws IOException {
+    public SnapshotDelta build(String snapshotDate, File tempDir) throws IOException {
         List<PublishedBlob> delta = new ArrayList<>();
+        // Deduping set: one staging object may hold several rows, so add-per-row would otherwise queue duplicate deletes.
+        Set<String> consumedStagingKeys = new LinkedHashSet<>();
 
         Set<String> tombstoned = new TreeSet<>(exportStoreClient.listTombstonedHealthCodes());
         if (!tombstoned.isEmpty()) {
@@ -89,7 +101,7 @@ public class SnapshotDeltaBuilder {
         }
 
         // 1) participant_versions first — defines the valid FK set and feeds participants_current.
-        VersionResult versions = buildParticipantVersions(tempDir, tombstoned, delta);
+        VersionResult versions = buildParticipantVersions(tempDir, tombstoned, delta, consumedStagingKeys);
 
         // 2) participants_current — full-replace from the latest version per health_code (§4.3.1).
         if (versions.mutated) {
@@ -98,29 +110,40 @@ public class SnapshotDeltaBuilder {
 
         // 3) record-keyed single-file tables (activity + file_records), orphan-deferred + tombstone-compacted.
         for (String table : RECORD_KEYED_TABLES) {
-            buildRecordKeyedTable(table, tempDir, tombstoned, versions.validKeys, delta);
+            buildRecordKeyedTable(table, tempDir, tombstoned, versions.validKeys, delta, consumedStagingKeys);
         }
 
         // 4) demographics — column-merge by health_code (§3.5.1 / §3.7.2), tombstone-compacted.
-        buildDemographics(tempDir, tombstoned, delta);
+        buildDemographics(tempDir, tombstoned, delta, consumedStagingKeys);
 
         // 5) keyboard_sessions — month-partitioned, append a date-named part per active month (§4.3.2).
-        buildKeyboard(snapshotDate, tempDir, tombstoned, versions.validKeys, delta);
+        buildKeyboard(snapshotDate, tempDir, tombstoned, versions.validKeys, delta, consumedStagingKeys);
 
-        // 6) Clear tombstone markers now that every table has compacted them out.
-        for (String healthCode : tombstoned) {
+        // Staging is NOT consumed and tombstones are NOT cleared here — commit() does that, but only AFTER the worker
+        // confirms the Azure upload (§4.5), so a crash/upload-failure before commit replays the identical delta.
+        LOG.info("ADDF publish {}: {} consolidated file(s) changed", snapshotDate, delta.size());
+        return new SnapshotDelta(delta, new ArrayList<>(consumedStagingKeys), new ArrayList<>(tombstoned));
+    }
+
+    /**
+     * Retire the staging objects coalesced into this snapshot and clear the tombstone markers it compacted out — called
+     * by the publish worker <b>only after</b> the Azure upload of {@link SnapshotDelta#getBlobs()} has confirmed (§4.5).
+     * Split from {@link #build} so an upload failure leaves staging + tombstones in place for an idempotent replay.
+     */
+    public void commit(SnapshotDelta delta) {
+        if (!delta.getConsumedStagingKeys().isEmpty()) {
+            exportStoreClient.deleteObjects(delta.getConsumedStagingKeys());
+        }
+        for (String healthCode : delta.getTombstonedHealthCodes()) {
             exportStoreClient.deleteTombstone(healthCode);
         }
-
-        LOG.info("ADDF publish {}: {} consolidated file(s) changed", snapshotDate, delta.size());
-        return delta;
     }
 
     // ---------------------------------------------------------------------------------------------------------------
     // participant_versions (dimension) — presence-upsert by (health_code, participant_version).
     // ---------------------------------------------------------------------------------------------------------------
     private VersionResult buildParticipantVersions(File tempDir, Set<String> tombstoned,
-            List<PublishedBlob> delta) throws IOException {
+            List<PublishedBlob> delta, Set<String> consumedStagingKeys) throws IOException {
         String table = AddfTables.PARTICIPANT_VERSIONS;
         Map<String, TableRow> byKey = new LinkedHashMap<>();
         boolean mutated = false;
@@ -138,17 +161,16 @@ public class SnapshotDeltaBuilder {
         }
 
         List<String> staged = exportStoreClient.listStaged(table);
-        List<String> consumed = new ArrayList<>();
         int i = 0;
         for (String key : staged) {
             File local = exportStoreClient.download(key, fileHelper.newFile(tempDir, table + "-staged-" + (i++) + ".parquet"));
             for (TableRow row : parquetTableReader.read(table, local)) {
                 if (tombstoned.contains(str(row.get("health_code")))) {
-                    consumed.add(key); // withdrawn: consume without exporting the NO_SHARING/late version as data
+                    consumedStagingKeys.add(key); // withdrawn: consume without exporting the NO_SHARING/late version
                     continue;
                 }
                 byKey.put(versionKey(row), row); // a version is immutable; a repeat key overwrites identical content
-                consumed.add(key);
+                consumedStagingKeys.add(key);
                 mutated = true;
             }
         }
@@ -156,7 +178,6 @@ public class SnapshotDeltaBuilder {
         if (mutated) {
             writeConsolidated(table, new ArrayList<>(byKey.values()), tempDir, delta);
         }
-        exportStoreClient.deleteObjects(consumed);
 
         Set<String> validKeys = new TreeSet<>(byKey.keySet());
         return new VersionResult(byKey, validKeys, mutated);
@@ -191,7 +212,7 @@ public class SnapshotDeltaBuilder {
     // Record-keyed single-file tables — upsert by record_id, defer orphans, compact tombstones.
     // ---------------------------------------------------------------------------------------------------------------
     private void buildRecordKeyedTable(String table, File tempDir, Set<String> tombstoned, Set<String> validKeys,
-            List<PublishedBlob> delta) throws IOException {
+            List<PublishedBlob> delta, Set<String> consumedStagingKeys) throws IOException {
         Map<String, TableRow> byRecordId = new LinkedHashMap<>();
         boolean mutated = false;
 
@@ -208,14 +229,13 @@ public class SnapshotDeltaBuilder {
         }
 
         List<String> staged = exportStoreClient.listStaged(table);
-        List<String> consumed = new ArrayList<>();
         int i = 0;
         for (String key : staged) {
             File local = exportStoreClient.download(key, fileHelper.newFile(tempDir, table + "-staged-" + (i++) + ".parquet"));
             for (TableRow row : parquetTableReader.read(table, local)) {
                 String healthCode = str(row.get("health_code"));
                 if (tombstoned.contains(healthCode)) {
-                    consumed.add(key);
+                    consumedStagingKeys.add(key);
                     continue;
                 }
                 if (isOrphan(healthCode, row.get("participant_version"), validKeys)) {
@@ -225,7 +245,7 @@ public class SnapshotDeltaBuilder {
                     continue;
                 }
                 byRecordId.put(str(row.get("record_id")), row);
-                consumed.add(key);
+                consumedStagingKeys.add(key);
                 mutated = true;
             }
         }
@@ -233,13 +253,13 @@ public class SnapshotDeltaBuilder {
         if (mutated) {
             writeConsolidated(table, new ArrayList<>(byRecordId.values()), tempDir, delta);
         }
-        exportStoreClient.deleteObjects(consumed);
     }
 
     // ---------------------------------------------------------------------------------------------------------------
     // demographics — column-merge by health_code: overlay non-null columns, preserve prior non-nulls, never null-out.
     // ---------------------------------------------------------------------------------------------------------------
-    private void buildDemographics(File tempDir, Set<String> tombstoned, List<PublishedBlob> delta) throws IOException {
+    private void buildDemographics(File tempDir, Set<String> tombstoned, List<PublishedBlob> delta,
+            Set<String> consumedStagingKeys) throws IOException {
         String table = AddfTables.DEMOGRAPHICS;
         Map<String, TableRow> byHealthCode = new LinkedHashMap<>();
         boolean mutated = false;
@@ -257,18 +277,17 @@ public class SnapshotDeltaBuilder {
         }
 
         List<String> staged = exportStoreClient.listStaged(table);
-        List<String> consumed = new ArrayList<>();
         int i = 0;
         for (String key : staged) {
             File local = exportStoreClient.download(key, fileHelper.newFile(tempDir, table + "-staged-" + (i++) + ".parquet"));
             for (TableRow partial : parquetTableReader.read(table, local)) {
                 String healthCode = str(partial.get("health_code"));
                 if (tombstoned.contains(healthCode)) {
-                    consumed.add(key);
+                    consumedStagingKeys.add(key);
                     continue;
                 }
                 mergeInto(byHealthCode, healthCode, partial);
-                consumed.add(key);
+                consumedStagingKeys.add(key);
                 mutated = true;
             }
         }
@@ -276,7 +295,6 @@ public class SnapshotDeltaBuilder {
         if (mutated) {
             writeConsolidated(table, new ArrayList<>(byHealthCode.values()), tempDir, delta);
         }
-        exportStoreClient.deleteObjects(consumed);
     }
 
     /** Column-merge one partial demographics row into the accumulator: fill nulls, preserve existing non-nulls. */
@@ -300,18 +318,17 @@ public class SnapshotDeltaBuilder {
     // keyboard_sessions — month-partitioned; each publish appends one date-named part per active month (§4.3.2).
     // ---------------------------------------------------------------------------------------------------------------
     private void buildKeyboard(String snapshotDate, File tempDir, Set<String> tombstoned, Set<String> validKeys,
-            List<PublishedBlob> delta) throws IOException {
+            List<PublishedBlob> delta, Set<String> consumedStagingKeys) throws IOException {
         String table = AddfTables.KEYBOARD_SESSIONS;
         List<String> staged = exportStoreClient.listStaged(table);
         Map<String, List<TableRow>> byMonth = new LinkedHashMap<>();
-        List<String> consumed = new ArrayList<>();
         int i = 0;
         for (String key : staged) {
             File local = exportStoreClient.download(key, fileHelper.newFile(tempDir, table + "-staged-" + (i++) + ".parquet"));
             for (TableRow row : parquetTableReader.read(table, local)) {
                 String healthCode = str(row.get("health_code"));
                 if (tombstoned.contains(healthCode)) {
-                    consumed.add(key);
+                    consumedStagingKeys.add(key);
                     continue;
                 }
                 if (isOrphan(healthCode, row.get("participant_version"), validKeys)) {
@@ -321,7 +338,7 @@ public class SnapshotDeltaBuilder {
                 }
                 String month = monthOf(str(row.get("session_start")), snapshotDate);
                 byMonth.computeIfAbsent(month, m -> new ArrayList<>()).add(row);
-                consumed.add(key);
+                consumedStagingKeys.add(key);
             }
         }
 
@@ -332,7 +349,6 @@ public class SnapshotDeltaBuilder {
             exportStoreClient.putObject(key, out);
             delta.add(new PublishedBlob(key, out));
         }
-        exportStoreClient.deleteObjects(consumed);
     }
 
     // ---------------------------------------------------------------------------------------------------------------
