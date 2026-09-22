@@ -5,6 +5,8 @@ import java.util.concurrent.ExecutorService;
 import com.amazonaws.ClientConfiguration;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
+import com.amazonaws.services.sqs.AmazonSQS;
+import com.amazonaws.services.sqs.AmazonSQSClientBuilder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
@@ -45,6 +47,19 @@ public class AddfSpringConfig {
                 .withSocketTimeout(60_000)
                 .withConnectionTTL(60_000);
         return AmazonS3ClientBuilder.standard()
+                .withClientConfiguration(clientConfig)
+                .build();
+    }
+
+    /** Dedicated SQS client for the ADDF backfill to enqueue AddfParticipantVersionWorker messages (Phase 3b.4). */
+    @Bean(name = "addfSqsClient")
+    public AmazonSQS addfSqsClient() {
+        ClientConfiguration clientConfig = new ClientConfiguration()
+                .withMaxConnections(50)
+                .withConnectionTimeout(10_000)
+                .withSocketTimeout(60_000)
+                .withConnectionTTL(60_000);
+        return AmazonSQSClientBuilder.standard()
                 .withClientConfiguration(clientConfig)
                 .build();
     }

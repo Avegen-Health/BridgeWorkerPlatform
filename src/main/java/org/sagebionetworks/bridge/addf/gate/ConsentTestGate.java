@@ -60,7 +60,20 @@ public class ConsentTestGate {
         List<String> dataGroups = participant.getDataGroups();
         boolean isTest = dataGroups != null && dataGroups.contains(DATA_GROUP_TEST_USER);
 
-        SharingScope scope = participant.getSharingScope();
+        return evaluateScope(participant.getSharingScope(), isTest);
+    }
+
+    /**
+     * Evaluate a self-contained {@code ParticipantVersion} snapshot's own scope + data groups (§3b.3), rather than the
+     * participant's <em>current</em> state. Used by the dimension worker so a historical version is judged by the
+     * consent that applied at that version. Same fail-closed rule: a NO_SHARING or test snapshot is not exported.
+     */
+    public ConsentVerdict evaluateVersion(SharingScope scope, List<String> dataGroups) {
+        boolean isTest = dataGroups != null && dataGroups.contains(DATA_GROUP_TEST_USER);
+        return evaluateScope(scope, isTest);
+    }
+
+    private ConsentVerdict evaluateScope(SharingScope scope, boolean isTest) {
         if (scope == null || scope == SharingScope.NO_SHARING) {
             return ConsentVerdict.skip(isTest);
         }
