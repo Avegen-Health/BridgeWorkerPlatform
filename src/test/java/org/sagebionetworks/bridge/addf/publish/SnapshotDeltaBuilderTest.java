@@ -159,8 +159,9 @@ public class SnapshotDeltaBuilderTest {
 
         assertTrue(delta.isEmpty());
         verify(mockWriter, never()).writeAll(eq(AddfTables.PHQ9), anyList(), any(File.class));
-        // Deferred: the staged object is NOT deleted (it retries next snapshot).
-        verify(mockStore).deleteObjects(ImmutableList.<String>of());
+        // Deferred: the staged object is NOT consumed/deleted (it retries next snapshot). Empty-list deletes for
+        // every table still happen; the point is the orphan key "p" is never among them.
+        verify(mockStore, never()).deleteObjects(ImmutableList.of("p"));
     }
 
     @Test
