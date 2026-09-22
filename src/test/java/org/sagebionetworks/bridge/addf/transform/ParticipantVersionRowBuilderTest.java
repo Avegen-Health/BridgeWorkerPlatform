@@ -43,7 +43,7 @@ public class ParticipantVersionRowBuilderTest {
         when(pv.getSharingScope()).thenReturn(SharingScope.SPONSORS_AND_PARTNERS);
         when(pv.getDataGroups()).thenReturn(ImmutableList.of("bbb", "aaa"));
         when(pv.getLanguages()).thenReturn(ImmutableList.of("en", "es"));
-        when(pv.getClientTimeZone()).thenReturn("America/New_York");
+        when(pv.getTimeZone()).thenReturn("America/New_York");
 
         TableRow row = builder.build(pv, false);
 
@@ -69,7 +69,7 @@ public class ParticipantVersionRowBuilderTest {
         when(pv.getSharingScope()).thenReturn(null);
         when(pv.getDataGroups()).thenReturn(null);
         when(pv.getLanguages()).thenReturn(null);
-        when(pv.getClientTimeZone()).thenReturn(null);
+        when(pv.getTimeZone()).thenReturn(null);
 
         TableRow row = builder.build(pv, false);
 

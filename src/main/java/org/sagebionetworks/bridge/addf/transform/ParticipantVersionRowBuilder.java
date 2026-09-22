@@ -44,7 +44,7 @@ public class ParticipantVersionRowBuilder {
         row.put("sharing_scope", pv.getSharingScope() == null ? null : pv.getSharingScope().toString());
         row.put("data_groups", joinSortedComma(pv.getDataGroups()));
         row.put("languages", joinPipe(pv.getLanguages()));
-        row.put("client_time_zone", pv.getClientTimeZone());
+        row.put("client_time_zone", pv.getTimeZone());
         row.put("created_on", AddfDateUtils.toUtcIso(pv.getCreatedOn()));
         row.put("modified_on", AddfDateUtils.toUtcIso(pv.getModifiedOn()));
         return row;
