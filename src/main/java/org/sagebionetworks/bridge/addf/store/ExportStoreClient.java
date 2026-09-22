@@ -18,6 +18,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import org.sagebionetworks.bridge.addf.transform.AddfDateUtils;
+import org.sagebionetworks.bridge.addf.transform.AddfTables;
 import org.sagebionetworks.bridge.config.Config;
 
 /**
@@ -37,7 +38,8 @@ public class ExportStoreClient {
     static final String ROOT_PREFIX = "biaffect-3/";
     static final String STAGING_PREFIX = ROOT_PREFIX + "_staging/";
     static final String TOMBSTONE_PREFIX = ROOT_PREFIX + "_tombstone/";
-    static final String CURRENT_TABLES_PREFIX = "current/tables/";
+    /** Public because the manifest gate (§7) recovers a table name from a delivery key rather than restating it. */
+    public static final String CURRENT_TABLES_PREFIX = "current/tables/";
     static final String CONFIG_KEY_EXPORTSTORE_BUCKET = "addf.exportstore.bucket";
 
     private AmazonS3 s3Client;
@@ -127,6 +129,16 @@ public class ExportStoreClient {
     /** List the staged per-record object keys under {@code _staging/<table>/} (all stage-date partitions), paged. */
     public List<String> listStaged(String table) {
         return listKeys(STAGING_PREFIX + table + "/");
+    }
+
+    /**
+     * List every keyboard month-part already in the delivery tree, under
+     * {@code biaffect-3/keyboard_sessions/month=.../}. {@code keyboard_sessions} is the one table with no consolidated
+     * single file, so {@link #consolidatedExists} can never answer "is this table present?" for it — the manifest gate
+     * (§7) uses this instead.
+     */
+    public List<String> listKeyboardParts() {
+        return listKeys(ROOT_PREFIX + AddfTables.KEYBOARD_SESSIONS + "/");
     }
 
     /** List tombstoned health codes (the basename under {@code _tombstone/}) — participants withdrawn since last publish (§3b.3). */
