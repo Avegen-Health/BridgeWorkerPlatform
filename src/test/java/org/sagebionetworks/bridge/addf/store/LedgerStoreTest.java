@@ -58,6 +58,39 @@ public class LedgerStoreTest {
         assertEquals(capturePut().getKey(), "biaffect-3/_ledger/version/hc-1/2");
     }
 
+    @Test
+    public void recordAndVersionScopesNeverCollide() {
+        // §3.6 keeps the two presence-skip modes in separate key scopes. If they shared one, an id that happens to
+        // appear as both a record id and a health code would cross-skip: a real upload silently dropped because a
+        // participant version of the same name was already written (or vice-versa).
+        when(mockS3.doesObjectExist(BUCKET, "biaffect-3/_ledger/record/shared-id")).thenReturn(true);
+
+        assertTrue(ledger.containsRecord("shared-id"));
+        assertFalse(ledger.containsVersion("shared-id", 1));
+    }
+
+    @Test
+    public void versionScopeIsKeyedByVersionNotJustParticipant() {
+        // A participant's v2 being written must not skip their v3 — participant_versions is version-scoped, so each
+        // new version lands as its own immutable row.
+        when(mockS3.doesObjectExist(BUCKET, "biaffect-3/_ledger/version/hc-1/2")).thenReturn(true);
+
+        assertTrue(ledger.containsVersion("hc-1", 2));
+        assertFalse(ledger.containsVersion("hc-1", 3));
+    }
+
+    @Test
+    public void thereIsNoDemographicsScope() {
+        // The third mode of §3.6 is an absence, and it is load-bearing: demographics is merge-always, so it must never
+        // consult this ledger. Its two source uploads are ledgered under *their own record ids* (record scope) — which
+        // is exactly what lets the second one through to be column-merged at publish rather than presence-skipped.
+        // This asserts the store exposes no health-code-keyed scope that could accidentally be wired up.
+        ledger.markRecord("rec-birth-gender");
+        assertEquals(capturePut().getKey(), "biaffect-3/_ledger/record/rec-birth-gender");
+        assertFalse(ledger.containsRecord("rec-diagnosis"),
+                "the other demographics upload for the same participant must still be processed");
+    }
+
     private PutObjectRequest capturePut() {
         ArgumentCaptor<PutObjectRequest> captor = ArgumentCaptor.forClass(PutObjectRequest.class);
         verify(mockS3).putObject(captor.capture());

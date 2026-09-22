@@ -49,9 +49,16 @@ public class KeyboardSessionsBuilder extends AbstractActivityRowBuilder {
         TableRow row = newRowWithCommon(ctx);
 
         SummaryComputer.KeyboardSummary k = summaryComputer.computeKeyboard(keylogs);
-        row.put("session_start", AddfDateUtils.epochSecondsToUtcIso(k.sessionStartEpoch));
+        // Session.json carries its own session-level `timestamp` and `duration`; prefer them over anything derived
+        // from the keylogs. The session closes after the last key is released, so a span measured between keylog
+        // timestamps understates it by that final hold time — 2.159s vs the payload's 2.220s on the golden fixture.
+        // The keylog-derived values stay as the fallback for a payload that omits the session-level fields.
+        Double sessionStartEpoch = doubleOrNull(session, "timestamp");
+        Double durationSec = doubleOrNull(session, "duration");
+        row.put("session_start", AddfDateUtils.epochSecondsToUtcIso(
+                sessionStartEpoch != null ? sessionStartEpoch : k.sessionStartEpoch));
         row.put("time_zone", null); // epoch timestamps carry no offset
-        row.put("duration_sec", k.durationSec);
+        row.put("duration_sec", durationSec != null ? durationSec : k.durationSec);
         row.put("total_keys", k.totalKeys);
         row.put("n_alphabet", k.nAlphabet);
         row.put("n_numeral", k.nNumeral);

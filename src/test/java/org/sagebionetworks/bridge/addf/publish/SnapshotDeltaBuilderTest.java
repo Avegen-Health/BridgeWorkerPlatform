@@ -6,6 +6,7 @@ import static org.mockito.Matchers.anyString;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
@@ -216,6 +217,127 @@ public class SnapshotDeltaBuilderTest {
         verify(mockStore, never()).deleteTombstone(anyString());
         builder.commit(delta);
         verify(mockStore).deleteTombstone("hc-x");
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // demographics — the one table built by column-merging two separate uploads (§3.5.1), with merge-always
+    // idempotency (§3.6: it never consults the ledger, so the same upload can legitimately be re-processed).
+    // -----------------------------------------------------------------------------------------------------------
+
+    /** The shape both demographics partials share: key, capture-time version, and the collection timestamp. */
+    private TableRow demographicsPartial(String healthCode, long version, String collectedOn) {
+        TableRow row = new TableRow(AddfTables.DEMOGRAPHICS, healthCode);
+        row.put("health_code", healthCode);
+        row.put("participant_version", version);
+        row.put("collected_on", collectedOn);
+        return row;
+    }
+
+    private TableRow birthGenderPartial() {
+        return demographicsPartial("hc-1", 2L, "2026-08-15T20:00:47.984Z")
+                .put("birth_year", 1981L)
+                .put("gender", "Female");
+    }
+
+    private TableRow diagnosisPartial() {
+        // 41 seconds after the birth-gender upload — the two are consecutive screens of the same onboarding flow.
+        return demographicsPartial("hc-1", 2L, "2026-08-15T20:01:28.909Z")
+                .put("bipolar_diagnosis", "I have never been diagnosed with bipolar disorder")
+                .put("other_psych_diagnoses", "Anxiety,Depression,Seasonal affective disorder");
+    }
+
+    private void stageDemographics(TableRow first, TableRow second) {
+        when(mockStore.listStaged(AddfTables.DEMOGRAPHICS)).thenReturn(ImmutableList.of("d0", "d1"));
+        rowsByFileName.put("demographics-staged-0.parquet", ImmutableList.of(first));
+        rowsByFileName.put("demographics-staged-1.parquet", ImmutableList.of(second));
+    }
+
+    @Test
+    public void demographicsColumnMergeIsOrderIndependent() throws Exception {
+        // Same two uploads, both orders. The merged row must be identical either way — the two arrive as separate
+        // completeUpload events and nothing guarantees which one publish lists first.
+        stageDemographics(birthGenderPartial(), diagnosisPartial());
+        builder.build(SNAPSHOT_DATE, tempDir);
+
+        stageDemographics(diagnosisPartial(), birthGenderPartial());
+        builder.build(SNAPSHOT_DATE, tempDir);
+
+        ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
+        verify(mockWriter, times(2)).writeAll(eq(AddfTables.DEMOGRAPHICS), captor.capture(), any(File.class));
+        @SuppressWarnings("unchecked")
+        List<TableRow> birthGenderFirst = (List<TableRow>) captor.getAllValues().get(0);
+        @SuppressWarnings("unchecked")
+        List<TableRow> diagnosisFirst = (List<TableRow>) captor.getAllValues().get(1);
+
+        assertEquals(birthGenderFirst.size(), 1);
+        assertEquals(diagnosisFirst.size(), 1);
+        assertEquals(birthGenderFirst.get(0).getValues(), diagnosisFirst.get(0).getValues(),
+                "demographics column-merge must be commutative");
+
+        // And the single row is complete: one participant, all columns from both uploads.
+        TableRow merged = birthGenderFirst.get(0);
+        assertEquals(merged.get("health_code"), "hc-1");
+        assertEquals(merged.get("birth_year"), 1981L);
+        assertEquals(merged.get("gender"), "Female");
+        assertEquals(merged.get("bipolar_diagnosis"), "I have never been diagnosed with bipolar disorder");
+        assertEquals(merged.get("other_psych_diagnoses"), "Anxiety,Depression,Seasonal affective disorder");
+        // collected_on is the only column both partials carry: the earlier of the pair wins, in either order. That
+        // matches the delivered data, where collected_on tracks the birth-gender upload.
+        assertEquals(merged.get("collected_on"), "2026-08-15T20:00:47.984Z");
+    }
+
+    @Test
+    public void demographicsCollectedOnKeepsTheEarlierTimestamp() throws Exception {
+        // Explicitly the reverse order, so a "first non-null wins" regression would show the later timestamp.
+        stageDemographics(diagnosisPartial(), birthGenderPartial());
+
+        builder.build(SNAPSHOT_DATE, tempDir);
+
+        ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
+        verify(mockWriter).writeAll(eq(AddfTables.DEMOGRAPHICS), captor.capture(), any(File.class));
+        @SuppressWarnings("unchecked")
+        List<TableRow> rows = captor.getValue();
+        assertEquals(rows.get(0).get("collected_on"), "2026-08-15T20:00:47.984Z");
+    }
+
+    @Test
+    public void reprocessedDiagnosisDoesNotNullOutBirthGender() throws Exception {
+        // Merge-always (§3.6): demographics never consults the ledger, so the same Diagnosis upload can be staged
+        // again. The merge must be additive — a replace would wipe birth_year/gender from the delivered row.
+        when(mockStore.consolidatedExists(AddfTables.DEMOGRAPHICS)).thenReturn(true);
+        TableRow alreadyMerged = birthGenderPartial()
+                .put("bipolar_diagnosis", "I have never been diagnosed with bipolar disorder");
+        rowsByFileName.put("demographics-existing.parquet", ImmutableList.of(alreadyMerged));
+
+        when(mockStore.listStaged(AddfTables.DEMOGRAPHICS)).thenReturn(ImmutableList.of("d"));
+        rowsByFileName.put("demographics-staged-0.parquet", ImmutableList.of(diagnosisPartial()));
+
+        builder.build(SNAPSHOT_DATE, tempDir);
+
+        ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
+        verify(mockWriter).writeAll(eq(AddfTables.DEMOGRAPHICS), captor.capture(), any(File.class));
+        @SuppressWarnings("unchecked")
+        List<TableRow> rows = captor.getValue();
+        assertEquals(rows.size(), 1, "re-processing must merge into the same participant row, not add a second");
+        assertEquals(rows.get(0).get("birth_year"), 1981L);
+        assertEquals(rows.get(0).get("gender"), "Female");
+        assertEquals(rows.get(0).get("other_psych_diagnoses"), "Anxiety,Depression,Seasonal affective disorder");
+        assertEquals(rows.get(0).get("collected_on"), "2026-08-15T20:00:47.984Z");
+    }
+
+    @Test
+    public void demographicsIsMergedByHealthCodeNotByRecord() throws Exception {
+        // Two participants staged together stay two rows; the merge key is health_code, not the staging object.
+        when(mockStore.listStaged(AddfTables.DEMOGRAPHICS)).thenReturn(ImmutableList.of("d0", "d1"));
+        rowsByFileName.put("demographics-staged-0.parquet", ImmutableList.of(birthGenderPartial()));
+        rowsByFileName.put("demographics-staged-1.parquet", ImmutableList.of(
+                demographicsPartial("hc-2", 3L, "2026-08-08T20:16:16.545Z").put("birth_year", 1979L)));
+
+        builder.build(SNAPSHOT_DATE, tempDir);
+
+        ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
+        verify(mockWriter).writeAll(eq(AddfTables.DEMOGRAPHICS), captor.capture(), any(File.class));
+        assertEquals(captor.getValue().size(), 2);
     }
 
     @Test

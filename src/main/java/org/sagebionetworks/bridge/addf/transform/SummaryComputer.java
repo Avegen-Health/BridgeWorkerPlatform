@@ -1,5 +1,7 @@
 package org.sagebionetworks.bridge.addf.transform;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
@@ -82,9 +84,9 @@ public class SummaryComputer {
         s.nSuggestion = sugg;
         s.nAutocorrection = auto;
         s.nOther = other;
-        s.meanHoldDuration = mean(holds);
-        s.medianHoldDuration = median(holds);
-        s.meanDistFromCenter = mean(dists);
+        s.meanHoldDuration = round(mean(holds), TIME_SCALE);
+        s.medianHoldDuration = round(median(holds), TIME_SCALE);
+        s.meanDistFromCenter = round(mean(dists), DISTANCE_SCALE);
         if (minTs != null && maxTs != null) {
             s.durationSec = maxTs - minTs;
             s.sessionStartEpoch = minTs;
@@ -127,8 +129,8 @@ public class SummaryComputer {
         }
         s.sampleCount = count;
         if (count > 0) {
-            s.accelMagMean = sum / count;
-            s.accelMagMax = max;
+            s.accelMagMean = round(sum / count, TIME_SCALE);
+            s.accelMagMax = round(max, TIME_SCALE);
         }
         return s;
     }
@@ -206,13 +208,33 @@ public class SummaryComputer {
         s.nCorrect = nCorrect;
         s.commissionErrors = commission;
         s.omissionErrors = omission;
-        s.meanReactionTime = mean(reactionTimes);
-        s.medianReactionTime = median(reactionTimes);
+        s.meanReactionTime = round(mean(reactionTimes), TIME_SCALE);
+        s.medianReactionTime = round(median(reactionTimes), TIME_SCALE);
         s.resultsJson = compact.toString();
         return s;
     }
 
     // ---- Stats helpers ---------------------------------------------------------------------------------------
+
+    /**
+     * Decimal places the delivered data keeps for a <b>derived</b> statistic. Read off the golden tables rather than
+     * chosen: durations and accelerometer magnitudes are stored at 5 dp ({@code mean_hold_duration} = {@code 0.06238},
+     * {@code mean_reaction_time} = {@code 0.30514}, {@code accel_mag_max} = {@code 1.05706}), on-screen distances at 4
+     * ({@code mean_dist_from_center} = {@code 10.8053}) — consistent across every delivered row. Values passed
+     * straight through from the payload ({@code duration_sec}, {@code runtime_sec}, the JSON columns) keep full
+     * precision; only what we compute here is rounded. Pinned by {@code GoldenFlattenerTest}.
+     */
+    static final int TIME_SCALE = 5;
+
+    static final int DISTANCE_SCALE = 4;
+
+    /** Round a derived statistic to a delivered scale. Null-safe; non-finite values pass through untouched. */
+    static Double round(Double value, int scale) {
+        if (value == null || value.isNaN() || value.isInfinite()) {
+            return value;
+        }
+        return BigDecimal.valueOf(value).setScale(scale, RoundingMode.HALF_UP).doubleValue();
+    }
 
     static Double mean(List<Double> values) {
         if (values.isEmpty()) {

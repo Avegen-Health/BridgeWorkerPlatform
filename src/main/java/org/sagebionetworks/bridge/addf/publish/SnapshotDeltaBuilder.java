@@ -17,6 +17,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import org.sagebionetworks.bridge.addf.store.ExportStoreClient;
+import org.sagebionetworks.bridge.addf.transform.AddfDateUtils;
 import org.sagebionetworks.bridge.addf.transform.AddfTables;
 import org.sagebionetworks.bridge.addf.transform.ParquetRowWriter;
 import org.sagebionetworks.bridge.addf.transform.TableRow;
@@ -57,6 +58,10 @@ public class SnapshotDeltaBuilder {
     private static final List<String> RECORD_KEYED_TABLES = ImmutableList.of(
             AddfTables.PHQ9, AddfTables.SELF_RATING, AddfTables.EVENING_LOG, AddfTables.GO_NO_GO,
             AddfTables.TRAIL_MAKING, AddfTables.FILE_RECORDS);
+
+    /** The two columns both demographics partials carry — the only ones whose merge needs a tie-break (§3.5.1). */
+    private static final String COLLECTED_ON = "collected_on";
+    private static final String PARTICIPANT_VERSION = "participant_version";
 
     private ExportStoreClient exportStoreClient;
     private ParquetRowWriter parquetRowWriter;
@@ -297,7 +302,16 @@ public class SnapshotDeltaBuilder {
         }
     }
 
-    /** Column-merge one partial demographics row into the accumulator: fill nulls, preserve existing non-nulls. */
+    /**
+     * Column-merge one partial demographics row into the accumulator: fill nulls, never null out an existing value
+     * (that is the merge-always idempotency of §3.6 — re-processing {@code Diagnosis} must not wipe birth/gender).
+     *
+     * <p>The two partials overlap on exactly two columns, {@code collected_on} and {@code participant_version}; every
+     * other column comes from only one of the pair. "First non-null wins" on those two would make the merged row
+     * depend on the order the uploads happen to be listed in, breaking the order-independence §3.5.1 requires. Keeping
+     * the <b>lower</b> value makes the merge commutative and matches the delivered data, where {@code collected_on}
+     * tracks the first of the pair (the two uploads are minutes apart in the same onboarding flow).</p>
+     */
     private void mergeInto(Map<String, TableRow> byHealthCode, String healthCode, TableRow partial) {
         TableRow target = byHealthCode.get(healthCode);
         if (target == null) {
@@ -306,12 +320,30 @@ public class SnapshotDeltaBuilder {
         }
         for (String column : AddfTables.columnNames(AddfTables.DEMOGRAPHICS)) {
             Object incoming = partial.get(column);
-            if (incoming != null && target.get(column) == null) {
+            if (incoming == null) {
+                continue;
+            }
+            Object existing = target.get(column);
+            if (existing == null) {
                 target.put(column, incoming);
+            } else if (COLLECTED_ON.equals(column)) {
+                target.put(column, earlierTimestamp(existing, incoming));
+            } else if (PARTICIPANT_VERSION.equals(column)) {
+                target.put(column, asLong(incoming) < asLong(existing) ? incoming : existing);
             }
         }
         // Always ensure the key column is set (a first partial may legitimately carry it).
         target.put("health_code", healthCode);
+    }
+
+    /** The earlier of two ISO timestamps, compared by instant; falls back to the existing value if either won't parse. */
+    private static Object earlierTimestamp(Object existing, Object incoming) {
+        Long existingMillis = AddfDateUtils.epochMillis(str(existing));
+        Long incomingMillis = AddfDateUtils.epochMillis(str(incoming));
+        if (existingMillis == null || incomingMillis == null) {
+            return existingMillis == null ? incoming : existing;
+        }
+        return incomingMillis < existingMillis ? incoming : existing;
     }
 
     // ---------------------------------------------------------------------------------------------------------------

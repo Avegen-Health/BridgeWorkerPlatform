@@ -1,17 +1,20 @@
 package org.sagebionetworks.bridge.addf;
 
 import static org.mockito.Matchers.any;
+import static org.mockito.Matchers.anyInt;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.testng.Assert.assertEquals;
 
 import java.io.File;
 
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
+import org.mockito.ArgumentCaptor;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
@@ -22,6 +25,7 @@ import org.sagebionetworks.bridge.addf.gate.ConsentVerdict;
 import org.sagebionetworks.bridge.addf.store.ExportStoreClient;
 import org.sagebionetworks.bridge.addf.store.LedgerStore;
 import org.sagebionetworks.bridge.addf.transform.FileRecordBuilder;
+import org.sagebionetworks.bridge.addf.transform.FlattenContext;
 import org.sagebionetworks.bridge.addf.transform.ParquetRowWriter;
 import org.sagebionetworks.bridge.addf.transform.RecordFlattener;
 import org.sagebionetworks.bridge.addf.transform.TableRow;
@@ -170,5 +174,56 @@ public class AddfExportWorkerProcessorTest {
         verify(mockExportStore).stageTableRow(eq("file_records"), eq(RECORD_ID), any(File.class));
         verify(mockExportStore, never()).stageTableRow(eq("phq9"), any(String.class), any(File.class));
         verify(mockLedger).markRecord(RECORD_ID);
+    }
+
+    @Test
+    public void backloggedRecordKeepsItsCaptureTimeParticipantVersion() throws Exception {
+        // §3.5.3: participant_version is the version that applied when the record was *captured*, read straight off
+        // HealthDataRecordEx3 — never a fresh "what is this participant on now?" lookup. A record that sat in the
+        // upload backlog while the participant moved on must still be filed under its own version, or every
+        // downstream join silently attributes old data to newer participant state.
+        stubThroughFetch();
+        when(mockRecord.getParticipantVersion()).thenReturn(3);
+
+        when(mockFlattener.flattenContent(any(), eq(ITEM))).thenReturn(new TableRow("phq9", RECORD_ID));
+        when(mockFileHelper.newFile(tempDir, "content.parquet")).thenReturn(new File("content.parquet"));
+        when(mockFileHelper.newFile(tempDir, "file_records.parquet")).thenReturn(new File("fr.parquet"));
+        when(mockFileRecordBuilder.build(any(), eq(ITEM), eq(RAW_KEY), any(String.class)))
+                .thenReturn(new TableRow("file_records", RECORD_ID));
+
+        processor.process(request());
+
+        ArgumentCaptor<FlattenContext> contentContext = ArgumentCaptor.forClass(FlattenContext.class);
+        verify(mockFlattener).flattenContent(contentContext.capture(), eq(ITEM));
+        assertEquals(contentContext.getValue().getParticipantVersion(), Integer.valueOf(3));
+
+        // The manifest row is built from the same context, so file_records carries the same capture-time FK.
+        ArgumentCaptor<FlattenContext> manifestContext = ArgumentCaptor.forClass(FlattenContext.class);
+        verify(mockFileRecordBuilder).build(manifestContext.capture(), eq(ITEM), eq(RAW_KEY), any(String.class));
+        assertEquals(manifestContext.getValue().getParticipantVersion(), Integer.valueOf(3));
+
+        // And the worker never asks Bridge for the participant's current version — that lookup would be the drift bug.
+        verify(mockBridgeHelper, never()).getParticipantVersion(any(String.class), any(String.class), anyInt());
+    }
+
+    @Test
+    public void ledgerPresenceSkipIsKeyedByRecordNotParticipant() throws Exception {
+        // §3.6: the three idempotency modes are not uniform. Activity/file_records presence-skip by record_id; the
+        // participant-keyed tables do not. Keying the skip on the record is what lets demographics stay merge-always —
+        // a participant's second demographics upload must not be skipped because their first one was processed.
+        stubThroughFetch();
+        when(mockFlattener.flattenContent(any(), eq(ITEM))).thenReturn(null);
+        when(mockFileHelper.newFile(tempDir, "file_records.parquet")).thenReturn(new File("fr.parquet"));
+        when(mockFileRecordBuilder.build(any(), eq(ITEM), eq(RAW_KEY), any(String.class)))
+                .thenReturn(new TableRow("file_records", RECORD_ID));
+
+        processor.process(request());
+
+        verify(mockLedger).containsRecord(RECORD_ID);
+        verify(mockLedger).markRecord(RECORD_ID);
+        // The record scope is the only one the accumulate worker touches: no version-scope entry is written here
+        // (that is the dimension worker's mode), and there is no demographics/health-code scope at all.
+        verify(mockLedger, never()).containsVersion(any(String.class), anyInt());
+        verify(mockLedger, never()).markVersion(any(String.class), anyInt());
     }
 }
