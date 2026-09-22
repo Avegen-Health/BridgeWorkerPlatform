@@ -58,6 +58,31 @@ public class ExportStoreClient {
     }
 
     /**
+     * Stage one participant-version row (Phase 3b) as an immutable per-version object at
+     * {@code biaffect-3/_staging/participant_versions/<stageDate>/<healthCode>_<version>.parquet}. Publish upserts the
+     * staged partials into {@code participant_versions.parquet} and derives {@code participants_current} (§3.7.2). A
+     * version is immutable, so a repeat key is a harmless overwrite of identical content.
+     */
+    public void stageVersionRow(String healthCode, int participantVersion, File parquetFile) {
+        String key = ROOT_PREFIX + "_staging/" + org.sagebionetworks.bridge.addf.transform.AddfTables.PARTICIPANT_VERSIONS
+                + "/" + AddfDateUtils.todayUtcDate() + "/" + healthCode + "_" + participantVersion + ".parquet";
+        putFile(key, parquetFile);
+        LOG.info("ADDF staged participant_version: healthCode={} version={} key={}", healthCode, participantVersion,
+                key);
+    }
+
+    /**
+     * Mark a participant for tombstone/compaction at the next publish (§3b.3 withdrawal path). Writing a marker under
+     * {@code _tombstone/<healthCode>} lets the publish worker compact that participant's rows without exporting a
+     * NO_SHARING version as data.
+     */
+    public void markTombstone(String healthCode) {
+        String key = ROOT_PREFIX + "_tombstone/" + healthCode;
+        putEmpty(key);
+        LOG.info("ADDF tombstone marked for healthCode={} (compaction at next publish)", healthCode);
+    }
+
+    /**
      * Copy the raw archive verbatim to {@code biaffect-3/raw/<uploadDate>/<recordId>-<assessment>.zip} (immutable —
      * never overwrite an existing key). Returns the key <em>relative to the delivery root</em> for the
      * {@code file_records.file_name} column (e.g. {@code raw/2026-08-15/rec-...-PHQ-9.zip}).
@@ -78,6 +103,14 @@ public class ExportStoreClient {
         ObjectMetadata metadata = new ObjectMetadata();
         metadata.setSSEAlgorithm(ObjectMetadata.AES_256_SERVER_SIDE_ENCRYPTION);
         s3Client.putObject(new PutObjectRequest(bucket, key, file).withMetadata(metadata));
+    }
+
+    private void putEmpty(String key) {
+        byte[] body = new byte[0];
+        ObjectMetadata metadata = new ObjectMetadata();
+        metadata.setSSEAlgorithm(ObjectMetadata.AES_256_SERVER_SIDE_ENCRYPTION);
+        metadata.setContentLength(body.length);
+        s3Client.putObject(new PutObjectRequest(bucket, key, new java.io.ByteArrayInputStream(body), metadata));
     }
 
     private static String sanitize(String assessment) {
