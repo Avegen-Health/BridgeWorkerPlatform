@@ -36,8 +36,10 @@ deploy:
   env: bridgeworker-$TRAVIS_BRANCH
   bucket:
     develop: elasticbeanstalk-us-east-1-420786776710
-    uat: elasticbeanstalk-gvbridge-worker-uat-us-east-1-420786776710
+    uat: elasticbeanstalk-us-east-1-433864969993
     prod: elasticbeanstalk-us-east-1-233151233756
   zip-file: eb-bundle.zip
   on:
-    branch: prod
+    branch:
+    - uat
+    - prod
