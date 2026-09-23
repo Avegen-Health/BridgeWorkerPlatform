@@ -367,6 +367,38 @@
             <artifactId>azure-storage-blob</artifactId>
             <version>12.20.3</version>
         </dependency>
+
+        <!--
+            Reactor pinned explicitly for the Azure SDK, and it MUST stay declared here.
+
+            azure-storage-blob 12.20.3 -> azure-core 1.36.0 requires reactor-core 3.4.26 (azure-core even carries a
+            bannedDependencies rule locking it to exactly [3.4.26]). Our parent, spring-boot-starter-parent 1.5.17,
+            manages <reactor.version>2.0.8.RELEASE</reactor.version> - Reactor 2.x, an entirely different API
+            generation - and dependencyManagement beats a transitive request, so azure-core silently got 2.0.8.
+
+            The build succeeds either way: the breakage is runtime-only, and only on the code path that actually
+            constructs the SDK client. It surfaced on the first real publish as
+            "java.lang.ClassNotFoundException: reactor.util.context.ContextView" (added in reactor-core 3.4.0) thrown
+            from BlobContainerClientBuilder.buildClient(), so the snapshot built but nothing was ever uploaded. The
+            Phase 4 unit tests could not have caught it - BlobTransport.doUpload is package-private precisely so tests
+            intercept it without a live container, which means buildClient() is never exercised under test.
+
+            reactive-streams is declared alongside it because the parent does not manage it: reactor-core 3.4.26 needs
+            1.0.4, while the old Reactor 2.x line brought 1.0.0. Pinning both keeps the pair consistent.
+
+            Nothing else in this project uses Reactor, so overriding the parent's version stays contained to the Azure
+            transport.
+        -->
+        <dependency>
+            <groupId>io.projectreactor</groupId>
+            <artifactId>reactor-core</artifactId>
+            <version>3.4.26</version>
+        </dependency>
+        <dependency>
+            <groupId>org.reactivestreams</groupId>
+            <artifactId>reactive-streams</artifactId>
+            <version>1.0.4</version>
+        </dependency>
     </dependencies>
 
     <repositories>
