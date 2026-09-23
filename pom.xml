@@ -207,6 +207,166 @@
             <artifactId>zip4j</artifactId>
             <version>2.11.5</version>
         </dependency>
+
+        <!--
+            ADDF export (Phase 3): Parquet writer.
+
+            Decision (implementation-plan §3.9): parquet-avro on a *trimmed* Hadoop tree. parquet-avro is pure-JVM
+            (no native lib, unlike the DuckDB alternative), but parquet-hadoop transitively drags the full Hadoop
+            web (jetty, jersey, zookeeper, kerberos, its own older Jackson, etc.) which would bloat the WAR far
+            beyond the writer itself. We keep only hadoop-common (for org.apache.hadoop.conf.Configuration + the
+            local FileSystem/Path that AvroParquetWriter needs) and exclude the rest. hadoop-common's Jackson is
+            excluded so the project's jackson-databind ${jackson-databind.version} wins.
+        -->
+        <dependency>
+            <groupId>org.apache.parquet</groupId>
+            <artifactId>parquet-avro</artifactId>
+            <version>1.13.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-common</artifactId>
+            <version>3.3.6</version>
+            <exclusions>
+                <!-- Keep the project's Jackson; drop Hadoop's older bundled Jackson. -->
+                <exclusion>
+                    <groupId>com.fasterxml.jackson.core</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <!-- Servlet/web/RPC stack Parquet's local-file writer never touches. -->
+                <exclusion>
+                    <groupId>org.eclipse.jetty</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.sun.jersey</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.zookeeper</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.curator</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.kerby</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.hadoop</groupId>
+                    <artifactId>hadoop-auth</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>log4j</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-log4j12</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.reload4j</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.google.protobuf</groupId>
+                    <artifactId>protobuf-java</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.avro</groupId>
+                    <artifactId>avro</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!--
+            parquet-hadoop's ParquetWriter references org.apache.hadoop.mapreduce.lib.output.FileOutputFormat
+            (and FileOutputCommitter) at construction time; those classes live in hadoop-mapreduce-client-core,
+            NOT hadoop-common, so without this the writer NoClassDefFounds on its first write. Same web/log/Jackson
+            exclusions as hadoop-common above to keep the tree trimmed (the local-file write path needs none of it).
+        -->
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-mapreduce-client-core</artifactId>
+            <version>3.3.6</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>com.fasterxml.jackson.core</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.eclipse.jetty</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.sun.jersey</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.zookeeper</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.curator</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.kerby</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>log4j</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-log4j12</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-reload4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>ch.qos.reload4j</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.google.protobuf</groupId>
+                    <artifactId>protobuf-java</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>org.apache.avro</groupId>
+                    <artifactId>avro</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!--
+            ADDF export (Phase 4): Azure Blob transport for the daily publish.
+
+            Decision (implementation-plan §4.4.2): the in-JVM azure-storage-blob SDK, NOT the azcopy CLI. BWP runs on
+            the managed Corretto 8 / Tomcat EB platform (not Docker), so a native binary would need an .ebextensions
+            install + PATH management; the SDK is a plain Maven jar (same class of dependency as parquet-avro above)
+            and removes the only novel native runtime dependency the plan otherwise carried. SnapshotDeltaBuilder
+            computes the exact changed-file set, so azcopy sync's recursive self-heal is unnecessary — a targeted
+            per-blob upload replaces it.
+
+            Version 12.20.x is pinned deliberately: it pairs with azure-core built against the Jackson 2.13 baseline,
+            matching the project's jackson-databind ${jackson-databind.version}. Newer azure-storage-blob (12.25+) pulls
+            a newer Jackson baseline that could clash with the project's pin. Jackson is NOT excluded here: azure-core
+            genuinely needs jackson-dataformat-xml/jsr310, and Maven mediation already resolves jackson-databind to the
+            project's directly-declared 2.13.5 — so all Jackson modules stay on the 2.13 line and agree.
+        -->
+        <dependency>
+            <groupId>com.azure</groupId>
+            <artifactId>azure-storage-blob</artifactId>
+            <version>12.20.3</version>
+        </dependency>
     </dependencies>
 
     <repositories>
