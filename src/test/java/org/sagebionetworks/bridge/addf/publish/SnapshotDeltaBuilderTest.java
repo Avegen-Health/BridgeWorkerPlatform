@@ -68,11 +68,6 @@ public class SnapshotDeltaBuilderTest {
                 .thenAnswer(inv -> "biaffect-3/keyboard_sessions/month=" + inv.getArgumentAt(0, String.class)
                         + "/part-" + inv.getArgumentAt(1, String.class) + ".parquet");
 
-        // Raw layer: nothing delivered yet, every referenced archive present in the store.
-        when(mockLedger.listDeliveredRaw()).thenReturn(new LinkedHashSet<String>());
-        when(mockStore.rawKey(anyString())).thenAnswer(inv -> "biaffect-3/" + inv.getArgumentAt(0, String.class));
-        when(mockStore.objectExists(anyString())).thenReturn(true);
-
         // newFile -> a File whose name we control; download returns that same file; reader reads rows by file name.
         when(mockFileHelper.newFile(any(File.class), anyString()))
                 .thenAnswer(inv -> new File(tempDir, inv.getArgumentAt(1, String.class)));
@@ -86,7 +81,6 @@ public class SnapshotDeltaBuilderTest {
 
         builder = new SnapshotDeltaBuilder();
         builder.setExportStoreClient(mockStore);
-        builder.setLedgerStore(mockLedger);
         builder.setParquetRowWriter(mockWriter);
         builder.setParquetTableReader(mockReader);
         builder.setFileHelper(mockFileHelper);
@@ -270,54 +264,54 @@ public class SnapshotDeltaBuilderTest {
     }
 
     // -----------------------------------------------------------------------------------------------------------
-    // Raw layer (§4.3.4) — archives ride the same delta as the tables, ledger-gated to ship exactly once.
+    // Raw layer (§4.3.4) — the builder NAMES archives; RawArchiveDelivery ships them. These tests pin the naming:
+    // a candidate is produced exactly when a file_records row is newly consolidated, and never otherwise.
     // -----------------------------------------------------------------------------------------------------------
 
     @Test
-    public void rawArchiveIsDeliveredAndMarkedOnCommit() throws Exception {
+    public void newlyConsolidatedFileRecordYieldsRawCandidate() throws Exception {
         stageFileRecordWithRaw("rec-1", "raw/2026-09-22/rec-1-PHQ-9.zip");
 
         SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
-        assertTrue(deltaHasBlob(delta, "biaffect-3/raw/2026-09-22/rec-1-PHQ-9.zip"),
-                "expected the raw archive in the Azure upload set, got " + delta.getBlobs());
-        assertEquals(delta.getDeliveredRawKeys(), ImmutableList.of("raw/2026-09-22/rec-1-PHQ-9.zip"));
-        // Ledger is marked by commit(), not build() — a crash before the upload confirms must replay the archive.
-        verify(mockLedger, never()).markRawDelivered(anyString());
-        builder.commit(delta);
-        verify(mockLedger).markRawDelivered("raw/2026-09-22/rec-1-PHQ-9.zip");
+        assertEquals(delta.getRawCandidates().size(), 1);
+        RawCandidate candidate = delta.getRawCandidates().get(0);
+        assertEquals(candidate.getRelativeKey(), "raw/2026-09-22/rec-1-PHQ-9.zip");
+        // The health code must ride along: after withdrawal compaction deletes the file_records row there is no other
+        // way to attribute the archive, and attribution is what keeps a manual erasure request possible.
+        assertEquals(candidate.getHealthCode(), "hc-1");
     }
 
     @Test
-    public void alreadyDeliveredRawArchiveIsNotReUploaded() throws Exception {
+    public void rawArchivesAreNotCarriedInTheUploadDelta() throws Exception {
         stageFileRecordWithRaw("rec-1", "raw/2026-09-22/rec-1-PHQ-9.zip");
-        when(mockLedger.listDeliveredRaw()).thenReturn(ImmutableSet.of("raw/2026-09-22/rec-1-PHQ-9.zip"));
 
         SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
-        assertTrue(delta.getDeliveredRawKeys().isEmpty());
-        assertTrue(!deltaHasBlob(delta, "biaffect-3/raw/2026-09-22/rec-1-PHQ-9.zip"));
+        // Megabyte payloads must never accumulate in the delta (and therefore on local disk) alongside the tables.
+        assertTrue(!deltaHasBlob(delta, "biaffect-3/raw/2026-09-22/rec-1-PHQ-9.zip"),
+                "raw archives must be streamed separately, not batched into the delta: " + delta.getBlobs());
         verify(mockStore, never()).download(eq("biaffect-3/raw/2026-09-22/rec-1-PHQ-9.zip"), any(File.class));
     }
 
     @Test
-    public void alreadyPublishedFileRecordStillDeliversItsUnsentRawArchive() throws Exception {
-        // No staging at all — the row is already in the consolidated table from an earlier snapshot. Its archive must
-        // still ship: this is the catch-up path for records published before raw delivery existed.
+    public void alreadyConsolidatedFileRecordYieldsNoCandidate() throws Exception {
+        // The row is already in the consolidated table from an earlier snapshot and nothing is staged. It must NOT
+        // become a candidate: re-deriving the deliverable set from the whole table is what made every publish
+        // O(all records ever) and starved current data behind the historical backlog. History drains via
+        // _pending_raw/ instead.
         when(mockStore.consolidatedExists(AddfTables.FILE_RECORDS)).thenReturn(true);
         rowsByFileName.put("file_records-existing.parquet",
                 ImmutableList.of(fileRecordRow("rec-old", "hc-1", 2L, "raw/2026-09-01/rec-old-Evening_Log.zip")));
 
         SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
-        assertTrue(deltaHasBlob(delta, "biaffect-3/raw/2026-09-01/rec-old-Evening_Log.zip"));
-        // The table itself did not change, so only the archive is in the delta.
-        assertEquals(delta.getBlobs().size(), 1);
-        verify(mockWriter, never()).writeAll(eq(AddfTables.FILE_RECORDS), anyList(), any(File.class));
+        assertTrue(delta.getRawCandidates().isEmpty());
+        assertTrue(delta.getBlobs().isEmpty());
     }
 
     @Test
-    public void orphanFileRecordDefersItsRawArchive() throws Exception {
+    public void orphanFileRecordYieldsNoRawCandidate() throws Exception {
         // pv=9 with no participant_versions staged -> orphan -> row deferred, so its archive must not ship either.
         when(mockStore.listStaged(AddfTables.FILE_RECORDS)).thenReturn(ImmutableList.of("f"));
         rowsByFileName.put("file_records-staged-0.parquet",
@@ -326,33 +320,44 @@ public class SnapshotDeltaBuilderTest {
         SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
         assertTrue(delta.getBlobs().isEmpty());
-        assertTrue(delta.getDeliveredRawKeys().isEmpty());
+        assertTrue(delta.getRawCandidates().isEmpty());
     }
 
     @Test
-    public void tombstonedParticipantsRawArchiveIsNotDelivered() throws Exception {
-        when(mockStore.listTombstonedHealthCodes()).thenReturn(ImmutableList.of("hc-x"));
-        when(mockStore.consolidatedExists(AddfTables.FILE_RECORDS)).thenReturn(true);
-        rowsByFileName.put("file_records-existing.parquet",
-                ImmutableList.of(fileRecordRow("rec-x", "hc-x", 2L, "raw/2026-09-01/rec-x-PHQ-9.zip")));
-
-        SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
-
-        assertTrue(delta.getDeliveredRawKeys().isEmpty(), "withdrawn participant's archive must never ship");
-        assertTrue(!deltaHasBlob(delta, "biaffect-3/raw/2026-09-01/rec-x-PHQ-9.zip"));
-    }
-
-    @Test
-    public void missingRawArchiveIsSkippedNotFatal() throws Exception {
+    public void tombstonedParticipantYieldsNoRawCandidate() throws Exception {
+        // Withdrawn mid-run: the staged row is consumed without being consolidated, so no archive is named.
+        when(mockStore.listTombstonedHealthCodes()).thenReturn(ImmutableList.of("hc-1"));
         stageFileRecordWithRaw("rec-1", "raw/2026-09-22/rec-1-PHQ-9.zip");
-        when(mockStore.objectExists("biaffect-3/raw/2026-09-22/rec-1-PHQ-9.zip")).thenReturn(false);
 
         SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
-        // The tables still publish; the absent archive is skipped (and logged) rather than failing the whole day.
+        assertTrue(delta.getRawCandidates().isEmpty(), "withdrawn participant's archive must never be named");
+    }
+
+    @Test
+    public void fileRecordWithoutRawKeyYieldsNoCandidate() throws Exception {
+        when(mockStore.listStaged(AddfTables.PARTICIPANT_VERSIONS)).thenReturn(ImmutableList.of("v"));
+        rowsByFileName.put("participant_versions-staged-0.parquet", ImmutableList.of(versionRow("hc-1", 2)));
+        when(mockStore.listStaged(AddfTables.FILE_RECORDS)).thenReturn(ImmutableList.of("f"));
+        rowsByFileName.put("file_records-staged-0.parquet",
+                ImmutableList.of(fileRecordRow("rec-1", "hc-1", 2L, null)));
+
+        SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
+
+        // The row still publishes (file_records indexes every upload, mapped or not); there is just nothing to ship.
         verify(mockWriter).writeAll(eq(AddfTables.FILE_RECORDS), anyList(), any(File.class));
-        assertTrue(delta.getDeliveredRawKeys().isEmpty());
+        assertTrue(delta.getRawCandidates().isEmpty());
+    }
+
+    @Test
+    public void commitDoesNotTouchTheRawLedger() throws Exception {
+        // Raw marks belong to RawArchiveDelivery, immediately after each archive's own upload — never to a batch step
+        // at the end that an interruption could skip while still claiming credit.
+        stageFileRecordWithRaw("rec-1", "raw/2026-09-22/rec-1-PHQ-9.zip");
+        SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
+
         builder.commit(delta);
-        verify(mockLedger, never()).markRawDelivered(anyString());
+
+        verify(mockLedger, never()).markRawDelivered(anyString(), anyString());
     }
 }

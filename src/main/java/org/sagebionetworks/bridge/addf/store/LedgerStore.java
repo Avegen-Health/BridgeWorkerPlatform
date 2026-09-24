@@ -1,15 +1,10 @@
 package org.sagebionetworks.bridge.addf.store;
 
 import java.io.ByteArrayInputStream;
-import java.util.LinkedHashSet;
-import java.util.Set;
 
 import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.model.ListObjectsV2Request;
-import com.amazonaws.services.s3.model.ListObjectsV2Result;
 import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.amazonaws.services.s3.model.PutObjectRequest;
-import com.amazonaws.services.s3.model.S3ObjectSummary;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,10 +24,19 @@ import org.sagebionetworks.bridge.config.Config;
  *       &mdash; presence-skip: a version is immutable once written (used by Phase 3b).</li>
  *   <li><b>{@code demographics}</b> &mdash; <b>merge-always</b>: it never consults this ledger; its idempotency comes
  *       from the merge at publish being commutative/repeatable (§3.5.1 / §3.7.2).</li>
- *   <li><b>raw scope</b> (the {@code raw/<date>/<record>-<assessment>.zip} archives, keyed by that relative key)
- *       &mdash; presence-skip, marked by the <b>publish</b> worker after the Azure upload confirms, so each raw
- *       archive is delivered to the staging container exactly once (§4.3.4).</li>
+ *   <li><b>raw scope</b> ({@code _ledger/raw/<healthCode>/<date>/<record>-<assessment>.zip}) &mdash; written by the
+ *       <b>publish</b> worker after each raw archive's Azure upload confirms (§4.3.4). It serves two purposes:
+ *       presence-skip on replay, and — because the key carries the <b>health code</b> — a durable record of
+ *       <i>whose</i> data has left the AWS account.</li>
  * </ul>
+ *
+ * <p><b>Why the raw scope is health-code-keyed and the others are not.</b> Withdrawal compaction deletes the
+ * participant's {@code file_records} rows, and those rows are the only index from a health code to its
+ * {@code raw/…} archives. Raw archives that have already been delivered to the partner's container cannot be
+ * un-delivered by this codebase (there is no blob-delete path — see {@code RawArchiveDelivery}), so without a
+ * health-code-keyed ledger a withdrawal would leave delivered archives that nobody could even enumerate for a
+ * manual erasure request. Prefixing the ledger key with the health code keeps that enumeration possible for the
+ * lifetime of the export store: {@code aws s3 ls biaffect-3/_ledger/raw/<healthCode>/}.</p>
  *
  * <p>This ledger is entirely ADDF-internal. It must <b>never</b> flag Bridge's {@code HealthDataRecordEx3} — that would
  * be the dual-write bug.</p>
@@ -82,44 +86,32 @@ public class LedgerStore {
     }
 
     /**
-     * Every raw archive already delivered to the Azure staging container, as {@code file_records.file_name}-style
-     * relative keys ({@code raw/<date>/<record>-<assessment>.zip}) — read once per publish (§4.3.4).
-     *
-     * <p>A paged LIST rather than a HEAD per candidate: publish re-derives its deliverable set from the whole
-     * consolidated {@code file_records} table every run, so a per-row {@code doesObjectExist} would cost one S3 call
-     * per record per day forever. One LIST per 1000 markers is O(delivered/1000) instead.</p>
+     * Presence-skip check for one raw archive, scoped to its owning participant. Bounded by the per-run candidate
+     * set (new + previously-failed archives), so this is a handful of HEADs per publish rather than a scan of
+     * everything ever delivered.
      */
-    public Set<String> listDeliveredRaw() {
-        String prefix = ledgerKey(SCOPE_RAW, "");
-        Set<String> delivered = new LinkedHashSet<>();
-        ListObjectsV2Request req = new ListObjectsV2Request().withBucketName(bucket).withPrefix(prefix);
-        ListObjectsV2Result result;
-        do {
-            result = s3Client.listObjectsV2(req);
-            for (S3ObjectSummary summary : result.getObjectSummaries()) {
-                String suffix = summary.getKey().substring(prefix.length());
-                if (!suffix.isEmpty() && !suffix.endsWith("/")) {
-                    delivered.add(RAW_RELATIVE_PREFIX + suffix);
-                }
-            }
-            req.setContinuationToken(result.getNextContinuationToken());
-        } while (result.isTruncated());
-        return delivered;
+    public boolean containsRaw(String healthCode, String rawRelativeKey) {
+        return exists(rawLedgerKey(healthCode, rawRelativeKey));
     }
 
     /**
-     * Mark one raw archive delivered to Azure. Called by the publish worker's {@code commit} — i.e. <b>only after</b>
-     * the upload confirms — so a crash mid-upload replays the archive rather than silently dropping it (§4.5).
+     * Mark one raw archive delivered to Azure — called per archive, <b>immediately after</b> its own upload
+     * confirms, so an interrupted batch never claims credit for an archive that did not ship (§4.5).
      */
-    public void markRawDelivered(String rawRelativeKey) {
-        mark(ledgerKey(SCOPE_RAW, stripRawPrefix(rawRelativeKey)));
+    public void markRawDelivered(String healthCode, String rawRelativeKey) {
+        mark(rawLedgerKey(healthCode, rawRelativeKey));
     }
 
-    /** {@code raw/2026-08-15/rec-PHQ-9.zip} → {@code 2026-08-15/rec-PHQ-9.zip} (the ledger scope supplies the rest). */
-    private static String stripRawPrefix(String rawRelativeKey) {
-        return rawRelativeKey.startsWith(RAW_RELATIVE_PREFIX)
+    /**
+     * {@code (hc-1, raw/2026-08-15/rec-PHQ-9.zip)} → {@code biaffect-3/_ledger/raw/hc-1/2026-08-15/rec-PHQ-9.zip}.
+     * The {@code raw/} prefix is dropped because the scope segment already says "raw"; the health code is inserted
+     * so the ledger doubles as the who-has-what index (see class javadoc).
+     */
+    String rawLedgerKey(String healthCode, String rawRelativeKey) {
+        String suffix = rawRelativeKey.startsWith(RAW_RELATIVE_PREFIX)
                 ? rawRelativeKey.substring(RAW_RELATIVE_PREFIX.length())
                 : rawRelativeKey;
+        return ledgerKey(SCOPE_RAW, healthCode + "/" + suffix);
     }
 
     private String ledgerKey(String scope, String key) {

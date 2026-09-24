@@ -20,24 +20,26 @@ public final class SnapshotDelta {
     private final List<PublishedBlob> blobs;
     private final List<String> consumedStagingKeys;
     private final List<String> tombstonedHealthCodes;
-    private final List<String> deliveredRawKeys;
+    private final List<RawCandidate> rawCandidates;
 
     public SnapshotDelta(List<PublishedBlob> blobs, List<String> consumedStagingKeys,
             List<String> tombstonedHealthCodes) {
-        this(blobs, consumedStagingKeys, tombstonedHealthCodes, ImmutableList.of());
+        this(blobs, consumedStagingKeys, tombstonedHealthCodes, ImmutableList.<RawCandidate>of());
     }
 
     public SnapshotDelta(List<PublishedBlob> blobs, List<String> consumedStagingKeys,
-            List<String> tombstonedHealthCodes, List<String> deliveredRawKeys) {
+            List<String> tombstonedHealthCodes, List<RawCandidate> rawCandidates) {
         this.blobs = blobs;
         this.consumedStagingKeys = consumedStagingKeys;
         this.tombstonedHealthCodes = tombstonedHealthCodes;
-        this.deliveredRawKeys = deliveredRawKeys;
+        this.rawCandidates = rawCandidates;
     }
 
     /**
-     * Everything to upload to the Azure staging container this run: the consolidated table files (re)written plus the
-     * raw archives being delivered for the first time (§4.3.4).
+     * The consolidated table files (re)written this run — the set uploaded to Azure in one batch. Raw archives are
+     * deliberately <b>not</b> here: they are streamed one at a time by {@link RawArchiveDelivery} so that a
+     * megabyte-scale payload class never accumulates on the worker's local disk, and so that one unshippable archive
+     * cannot abort the table upload.
      */
     public List<PublishedBlob> getBlobs() {
         return blobs;
@@ -54,10 +56,12 @@ public final class SnapshotDelta {
     }
 
     /**
-     * Delivery-root-relative keys of the raw archives uploaded this run ({@code raw/<date>/<rec>-<item>.zip}) — written
-     * to the raw ledger by {@code commit} after the upload, so each archive ships exactly once (§4.3.4).
+     * The raw upload archives belonging to the {@code file_records} rows this run consolidated — handed to
+     * {@link RawArchiveDelivery} <b>before</b> {@link SnapshotDeltaBuilder#commit}, while the staging objects that
+     * produced them still exist (§4.3.4). Each carries its owning health code so delivery stays attributable after
+     * withdrawal compaction removes the rows.
      */
-    public List<String> getDeliveredRawKeys() {
-        return deliveredRawKeys;
+    public List<RawCandidate> getRawCandidates() {
+        return rawCandidates;
     }
 }

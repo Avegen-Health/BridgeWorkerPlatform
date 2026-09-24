@@ -17,7 +17,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import org.sagebionetworks.bridge.addf.store.ExportStoreClient;
-import org.sagebionetworks.bridge.addf.store.LedgerStore;
 import org.sagebionetworks.bridge.addf.transform.AddfTables;
 import org.sagebionetworks.bridge.addf.transform.ParquetRowWriter;
 import org.sagebionetworks.bridge.addf.transform.TableRow;
@@ -45,11 +44,21 @@ import org.sagebionetworks.bridge.file.FileHelper;
  * (Historical month-partitioned keyboard parts are compacted by the optional periodic compaction pass of §4.3.2, not
  * this daily publish.)</p>
  *
- * <p><b>Raw layer (§4.3.4):</b> the delta also carries the raw upload archives themselves — the delivery tree's second
- * layer ({@code raw/<upload-date>/<record>-<assessment>.zip}), which the tables index through
- * {@code file_records.file_name}. They are selected from the merged {@code file_records} rows (so they inherit the same
- * tombstone compaction and orphan deferral) and gated on the raw ledger, so each archive is uploaded exactly once and
- * the S3 copy stays the immutable original.</p>
+ * <p><b>Raw layer (§4.3.4):</b> this class does <b>not</b> move raw archives. It only names them — every
+ * {@code file_records} row it newly consolidates yields a {@link RawCandidate}, and {@link RawArchiveDelivery}
+ * streams those to Azure separately. Because a candidate is produced only for a row that cleared the tombstone and
+ * orphan gates below, the raw layer inherits the table layer's consent filtering by construction. Two properties are
+ * worth stating plainly, because the earlier design of this feature got both wrong: candidates come from rows
+ * consolidated <i>by this run</i> (never a rescan of the whole table, which would make every publish O(all records
+ * ever)), and the archives stay out of the delta (megabyte payloads must not accumulate on the worker's root volume
+ * before anything uploads).</p>
+ *
+ * <p><b>Withdrawal does not reach an archive that already shipped.</b> Tables are overwrite-in-place, so compaction
+ * propagates a withdrawal to the partner on the next publish. Raw delivery is append-only — there is no blob-delete
+ * path — so an archive delivered before the withdrawal stays in the partner's container. That is an accepted,
+ * documented limitation, not an oversight; {@code LedgerStore}'s health-code-keyed raw scope exists so the delivered
+ * set stays enumerable for a manual erasure request. Do not describe the raw layer as inheriting tombstone
+ * compaction without that caveat.</p>
  *
  * <p><b>Crash-safety (§4.5):</b> {@code build} writes the consolidated files (idempotent overwrite-in-place) but does
  * not consume staging or clear tombstones — that is {@code commit}'s job, and the worker calls {@code commit} only
@@ -68,16 +77,7 @@ public class SnapshotDeltaBuilder {
             AddfTables.PHQ9, AddfTables.SELF_RATING, AddfTables.EVENING_LOG, AddfTables.GO_NO_GO,
             AddfTables.TRAIL_MAKING, AddfTables.FILE_RECORDS);
 
-    /**
-     * Upper bound on raw archives shipped in one publish run. The deliverable set is re-derived from the whole
-     * {@code file_records} table every run, so the first run after this feature lands (or after any gap) faces the
-     * entire backlog; capping it keeps a single publish bounded and lets the remainder drain over the following days.
-     * Whatever is skipped is logged, never silently dropped.
-     */
-    static final int MAX_RAW_BLOBS_PER_RUN = 5000;
-
     private ExportStoreClient exportStoreClient;
-    private LedgerStore ledgerStore;
     private ParquetRowWriter parquetRowWriter;
     private ParquetTableReader parquetTableReader;
     private FileHelper fileHelper;
@@ -85,11 +85,6 @@ public class SnapshotDeltaBuilder {
     @Autowired
     public final void setExportStoreClient(ExportStoreClient exportStoreClient) {
         this.exportStoreClient = exportStoreClient;
-    }
-
-    @Autowired
-    public final void setLedgerStore(LedgerStore ledgerStore) {
-        this.ledgerStore = ledgerStore;
     }
 
     @Autowired
@@ -133,13 +128,14 @@ public class SnapshotDeltaBuilder {
         }
 
         // 3) record-keyed single-file tables (activity + file_records), orphan-deferred + tombstone-compacted.
-        Map<String, TableRow> fileRecordRows = new LinkedHashMap<>();
+        // file_records additionally yields this run's raw-archive candidates (§4.3.4): the archives belonging to the
+        // rows this run actually consolidated. Only newly-consolidated rows qualify — publish must not rescan the
+        // whole table for undelivered archives, which would make every run O(all records ever) and starve current
+        // data behind the historical backlog. History is drained separately via the pending-raw queue.
+        List<RawCandidate> rawCandidates = new ArrayList<>();
         for (String table : RECORD_KEYED_TABLES) {
-            Map<String, TableRow> merged = buildRecordKeyedTable(table, tempDir, tombstoned, versions.validKeys, delta,
-                    consumedStagingKeys);
-            if (AddfTables.FILE_RECORDS.equals(table)) {
-                fileRecordRows = merged;
-            }
+            buildRecordKeyedTable(table, tempDir, tombstoned, versions.validKeys, delta, consumedStagingKeys,
+                    AddfTables.FILE_RECORDS.equals(table) ? rawCandidates : null);
         }
 
         // 4) demographics — column-merge by health_code (§3.5.1 / §3.7.2), tombstone-compacted.
@@ -148,26 +144,23 @@ public class SnapshotDeltaBuilder {
         // 5) keyboard_sessions — month-partitioned, append a date-named part per active month (§4.3.2).
         buildKeyboard(snapshotDate, tempDir, tombstoned, versions.validKeys, delta, consumedStagingKeys);
 
-        int consolidatedCount = delta.size();
-
-        // 6) raw archives — the delivery tree's second layer (§4.3.4). Driven off the merged file_records rows, which
-        // are already tombstone-compacted and orphan-deferred, so a withdrawn or not-yet-publishable participant's
-        // archive is never shipped; ledger-gated so each ships exactly once.
-        List<String> deliveredRawKeys = buildRaw(tempDir, fileRecordRows.values(), delta);
-
-        // Staging is NOT consumed, tombstones are NOT cleared and the raw ledger is NOT marked here — commit() does
-        // that, but only AFTER the worker confirms the Azure upload (§4.5), so a crash/upload-failure before commit
-        // replays the identical delta.
-        LOG.info("ADDF publish {}: {} consolidated file(s) changed, {} raw archive(s) to deliver", snapshotDate,
-                consolidatedCount, deliveredRawKeys.size());
+        // Staging is NOT consumed and tombstones are NOT cleared here — commit() does that, but only AFTER the worker
+        // confirms the Azure upload (§4.5), so a crash/upload-failure before commit replays the identical delta.
+        LOG.info("ADDF publish {}: {} consolidated file(s) changed, {} raw archive candidate(s)", snapshotDate,
+                delta.size(), rawCandidates.size());
         return new SnapshotDelta(delta, new ArrayList<>(consumedStagingKeys), new ArrayList<>(tombstoned),
-                deliveredRawKeys);
+                rawCandidates);
     }
 
     /**
      * Retire the staging objects coalesced into this snapshot and clear the tombstone markers it compacted out — called
      * by the publish worker <b>only after</b> the Azure upload of {@link SnapshotDelta#getBlobs()} has confirmed (§4.5).
      * Split from {@link #build} so an upload failure leaves staging + tombstones in place for an idempotent replay.
+     *
+     * <p><b>Raw delivery must run before this.</b> {@link SnapshotDelta#getRawCandidates()} is derived from the staged
+     * rows this snapshot consumed; once those staging objects are deleted here, the candidate set cannot be
+     * reconstructed. {@link RawArchiveDelivery} therefore runs between the table upload and this call, and parks any
+     * archive it could not ship in the pending-raw queue so the record survives the staging delete.</p>
      */
     public void commit(SnapshotDelta delta) {
         if (!delta.getConsumedStagingKeys().isEmpty()) {
@@ -175,9 +168,6 @@ public class SnapshotDeltaBuilder {
         }
         for (String healthCode : delta.getTombstonedHealthCodes()) {
             exportStoreClient.deleteTombstone(healthCode);
-        }
-        for (String rawKey : delta.getDeliveredRawKeys()) {
-            ledgerStore.markRawDelivered(rawKey);
         }
     }
 
@@ -253,8 +243,9 @@ public class SnapshotDeltaBuilder {
     // ---------------------------------------------------------------------------------------------------------------
     // Record-keyed single-file tables — upsert by record_id, defer orphans, compact tombstones.
     // ---------------------------------------------------------------------------------------------------------------
-    private Map<String, TableRow> buildRecordKeyedTable(String table, File tempDir, Set<String> tombstoned,
-            Set<String> validKeys, List<PublishedBlob> delta, Set<String> consumedStagingKeys) throws IOException {
+    private void buildRecordKeyedTable(String table, File tempDir, Set<String> tombstoned,
+            Set<String> validKeys, List<PublishedBlob> delta, Set<String> consumedStagingKeys,
+            List<RawCandidate> rawCandidates) throws IOException {
         Map<String, TableRow> byRecordId = new LinkedHashMap<>();
         boolean mutated = false;
 
@@ -289,70 +280,29 @@ public class SnapshotDeltaBuilder {
                 byRecordId.put(str(row.get("record_id")), row);
                 consumedStagingKeys.add(key);
                 mutated = true;
+                if (rawCandidates != null) {
+                    addRawCandidate(rawCandidates, row);
+                }
             }
         }
 
         if (mutated) {
             writeConsolidated(table, new ArrayList<>(byRecordId.values()), tempDir, delta);
         }
-        return byRecordId;
     }
 
-    // ---------------------------------------------------------------------------------------------------------------
-    // raw archives (§4.3.4) — the delivery tree's second layer, shipped alongside the tables.
-    // ---------------------------------------------------------------------------------------------------------------
-
     /**
-     * Queue every not-yet-delivered raw archive referenced by the merged {@code file_records} rows for upload, and
-     * return their relative keys so {@link #commit} can mark them once the upload confirms.
-     *
-     * <p><b>Why drive it off {@code file_records} and not a {@code raw/} listing:</b> {@code file_records} is the only
-     * index into the raw layer (§3.5.2), and the merged set handed here has already had withdrawn participants
-     * compacted out and orphan rows deferred. A bucket listing would have no way to tell whose archive a
-     * {@code <record>-<assessment>.zip} is, and would ship archives for rows that are not published yet — or are not
-     * publishable at all.</p>
+     * Record one newly-consolidated {@code file_records} row's archive as due for delivery. Called only for rows that
+     * survived the tombstone and orphan gates above, so a withdrawn or not-yet-publishable participant's archive is
+     * never a candidate — the raw layer inherits the table layer's consent filtering by construction.
      */
-    private List<String> buildRaw(File tempDir, java.util.Collection<TableRow> fileRecordRows,
-            List<PublishedBlob> delta) {
-        if (fileRecordRows.isEmpty()) {
-            return new ArrayList<>();
+    private static void addRawCandidate(List<RawCandidate> rawCandidates, TableRow row) {
+        String relativeKey = str(row.get("file_name"));
+        String healthCode = str(row.get("health_code"));
+        if (relativeKey == null || healthCode == null || !relativeKey.startsWith(RAW_RELATIVE_PREFIX)) {
+            return;
         }
-        Set<String> alreadyDelivered = ledgerStore.listDeliveredRaw();
-        Set<String> pending = new TreeSet<>(); // sorted: oldest upload-date folder drains first when capped
-        int skippedOverCap = 0;
-        for (TableRow row : fileRecordRows) {
-            String relativeKey = str(row.get("file_name"));
-            if (relativeKey == null || !relativeKey.startsWith(RAW_RELATIVE_PREFIX)
-                    || alreadyDelivered.contains(relativeKey)) {
-                continue;
-            }
-            if (pending.size() >= MAX_RAW_BLOBS_PER_RUN && !pending.contains(relativeKey)) {
-                skippedOverCap++;
-                continue;
-            }
-            pending.add(relativeKey);
-        }
-        if (skippedOverCap > 0) {
-            LOG.warn("ADDF publish: raw delivery capped at {} archive(s) this run; {} deferred to the next publish",
-                    MAX_RAW_BLOBS_PER_RUN, skippedOverCap);
-        }
-
-        List<String> delivered = new ArrayList<>();
-        int i = 0;
-        for (String relativeKey : pending) {
-            String key = exportStoreClient.rawKey(relativeKey);
-            if (!exportStoreClient.objectExists(key)) {
-                // file_records points at an archive that is not in the store. Never fail the whole day for it — a
-                // missing archive is a data-integrity problem to investigate, not a reason to block the tables.
-                LOG.warn("ADDF publish: raw archive missing from export store, skipping: {}", key);
-                continue;
-            }
-            File local = exportStoreClient.download(key, fileHelper.newFile(tempDir, "raw-" + (i++) + ".zip"));
-            delta.add(new PublishedBlob(key, local));
-            delivered.add(relativeKey);
-            LOG.info("ADDF publish: queued raw archive {}", relativeKey);
-        }
-        return delivered;
+        rawCandidates.add(new RawCandidate(healthCode, relativeKey));
     }
 
     // ---------------------------------------------------------------------------------------------------------------

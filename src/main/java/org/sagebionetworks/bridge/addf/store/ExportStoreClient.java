@@ -37,6 +37,7 @@ public class ExportStoreClient {
     static final String ROOT_PREFIX = "biaffect-3/";
     static final String STAGING_PREFIX = ROOT_PREFIX + "_staging/";
     static final String TOMBSTONE_PREFIX = ROOT_PREFIX + "_tombstone/";
+    static final String PENDING_RAW_PREFIX = ROOT_PREFIX + "_pending_raw/";
     static final String CURRENT_TABLES_PREFIX = "current/tables/";
     static final String CONFIG_KEY_EXPORTSTORE_BUCKET = "addf.exportstore.bucket";
 
@@ -136,6 +137,45 @@ public class ExportStoreClient {
     /** True when an object exists at this full bucket key. */
     public boolean objectExists(String key) {
         return s3Client.doesObjectExist(bucket, key);
+    }
+
+    // ---------------------------------------------------------------------------------------------------------------
+    // Pending-raw retry queue (§4.3.4). A raw archive whose upload fails is parked here rather than failing the run;
+    // the next publish picks it up alongside that run's newly-consumed archives. Steady state the prefix is empty, so
+    // the extra LIST costs one empty-page round trip. It is also the seam the one-off historical backfill uses: seed
+    // keys here in controlled batches and the normal publish path drains them (see RawArchiveDelivery).
+    // ---------------------------------------------------------------------------------------------------------------
+
+    /** Park a raw archive for retry on the next publish. {@code healthCode} is carried so the retry stays attributable. */
+    public void markRawPending(String healthCode, String rawRelativeKey) {
+        putEmpty(pendingRawKey(healthCode, rawRelativeKey));
+        LOG.info("ADDF raw delivery parked for retry: {}", rawRelativeKey);
+    }
+
+    /** Clear a parked raw archive once it has been delivered. */
+    public void clearRawPending(String healthCode, String rawRelativeKey) {
+        s3Client.deleteObject(bucket, pendingRawKey(healthCode, rawRelativeKey));
+    }
+
+    /**
+     * Every raw archive currently parked for retry, as {@code healthCode + "\t" + rawRelativeKey} pairs. Returns the
+     * raw strings so the caller owns parsing; {@code RawArchiveDelivery} converts them back into candidates.
+     */
+    public List<String> listRawPending() {
+        List<String> pending = new ArrayList<>();
+        for (String key : listKeys(PENDING_RAW_PREFIX)) {
+            String suffix = key.substring(PENDING_RAW_PREFIX.length());
+            int slash = suffix.indexOf('/');
+            if (slash > 0 && slash < suffix.length() - 1) {
+                pending.add(suffix.substring(0, slash) + "\t" + "raw/" + suffix.substring(slash + 1));
+            }
+        }
+        return pending;
+    }
+
+    private String pendingRawKey(String healthCode, String rawRelativeKey) {
+        String suffix = rawRelativeKey.startsWith("raw/") ? rawRelativeKey.substring(4) : rawRelativeKey;
+        return PENDING_RAW_PREFIX + healthCode + "/" + suffix;
     }
 
     /** List the staged per-record object keys under {@code _staging/<table>/} (all stage-date partitions), paged. */

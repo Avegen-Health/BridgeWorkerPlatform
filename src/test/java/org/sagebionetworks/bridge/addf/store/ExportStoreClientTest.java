@@ -174,4 +174,62 @@ public class ExportStoreClientTest {
         summary.setKey(key);
         return summary;
     }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Raw key helpers + the pending-raw retry queue (§4.3.4).
+    // -----------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void rawKeyRoundTripsWithPutRaw() {
+        // putRaw returns the delivery-root-relative form that file_records.file_name stores; rawKey is its inverse.
+        // If these ever drift, every objectExists probe misses and the raw layer silently stops shipping.
+        when(mockS3.doesObjectExist(org.mockito.Matchers.eq(BUCKET), org.mockito.Matchers.anyString()))
+                .thenReturn(false);
+        String relative = client.putRaw("2026-08-15", "rec-1", "PHQ-9", new File("archive.zip"));
+
+        assertEquals(relative, "raw/2026-08-15/rec-1-PHQ-9.zip");
+        assertEquals(client.rawKey(relative), "biaffect-3/raw/2026-08-15/rec-1-PHQ-9.zip");
+        assertEquals(client.rawKey(relative), capturePut().getKey());
+    }
+
+    @Test
+    public void objectExistsDelegates() {
+        when(mockS3.doesObjectExist(BUCKET, "biaffect-3/raw/2026-08-15/rec-1-PHQ-9.zip")).thenReturn(true);
+
+        assertTrue(client.objectExists("biaffect-3/raw/2026-08-15/rec-1-PHQ-9.zip"));
+        assertFalse(client.objectExists("biaffect-3/raw/2026-08-15/nope.zip"));
+    }
+
+    @Test
+    public void markRawPendingWritesHealthCodeScopedMarker() {
+        client.markRawPending("hc-1", "raw/2026-08-15/rec-1-PHQ-9.zip");
+
+        assertEquals(capturePut().getKey(), "biaffect-3/_pending_raw/hc-1/2026-08-15/rec-1-PHQ-9.zip");
+    }
+
+    @Test
+    public void listRawPendingRoundTripsWhatMarkRawPendingWrote() {
+        client.markRawPending("hc-1", "raw/2026-08-15/rec-1-PHQ-9.zip");
+        String writtenKey = capturePut().getKey();
+
+        ListObjectsV2Result result = new ListObjectsV2Result();
+        result.getObjectSummaries().add(summary(writtenKey));
+        result.getObjectSummaries().add(summary("biaffect-3/_pending_raw/")); // folder placeholder -> skipped
+        when(mockS3.listObjectsV2(any(ListObjectsV2Request.class))).thenReturn(result);
+
+        // The retry queue is only useful if a parked entry parses back into the exact (healthCode, key) pair that
+        // was parked. Pin the write and the read against each other rather than against a literal.
+        assertEquals(client.listRawPending(),
+                ImmutableList.of("hc-1\traw/2026-08-15/rec-1-PHQ-9.zip"));
+    }
+
+    @Test
+    public void clearRawPendingDeletesTheSameMarker() {
+        client.markRawPending("hc-1", "raw/2026-08-15/rec-1-PHQ-9.zip");
+        String writtenKey = capturePut().getKey();
+
+        client.clearRawPending("hc-1", "raw/2026-08-15/rec-1-PHQ-9.zip");
+
+        verify(mockS3).deleteObject(BUCKET, writtenKey);
+    }
 }
