@@ -139,22 +139,38 @@ public class AddfParticipantVersionBackfillWorkerProcessor implements ThrowingCo
         int totalEnqueued = 0;
         Stopwatch stopwatch = Stopwatch.createStarted();
         Iterator<AccountSummary> accountIter = bridgeHelper.getAllAccountSummaries(appId, false);
-        while (accountIter.hasNext()) {
-            AccountSummary summary = accountIter.next();
-            if (summary == null || summary.getId() == null) {
-                continue;
-            }
-            totalEnqueued += enqueueAllVersions(appId, summary.getId(), "userId " + summary.getId());
+        try {
+            while (accountIter.hasNext()) {
+                AccountSummary summary = accountIter.next();
+                if (summary == null || summary.getId() == null) {
+                    continue;
+                }
+                totalEnqueued += enqueueAllVersions(appId, summary.getId(), "userId " + summary.getId());
 
-            numAccounts++;
-            if (numAccounts % REPORTING_INTERVAL == 0) {
-                LOG.info("ADDF backfill for app " + appId + ": " + numAccounts + " accounts, " + totalEnqueued +
-                        " versions enqueued in " + stopwatch.elapsed(TimeUnit.SECONDS) + "s");
+                numAccounts++;
+                if (numAccounts % REPORTING_INTERVAL == 0) {
+                    LOG.info("ADDF backfill for app " + appId + ": " + numAccounts + " accounts, " + totalEnqueued +
+                            " versions enqueued in " + stopwatch.elapsed(TimeUnit.SECONDS) + "s");
+                }
             }
+        } catch (RuntimeException ex) {
+            // Page loads happen inside the iterator, and AccountSummaryIterator wraps a page-load
+            // IOException as an unchecked RuntimeException ("Iterator can't throw exceptions"), so a
+            // transient pagination failure surfaces here and would otherwise abort the walk with no
+            // durable record of how far it got. Record the partial progress, then RETHROW.
+            //
+            // Deliberately NOT swallowed: returning normally would let the callback delete the SQS
+            // message, leaving a silently incomplete backfill -- an operator would believe the run
+            // succeeded while pre-existing participants stayed orphan-deferred, which is the exact
+            // failure this worker exists to fix. Rethrowing redelivers instead, and the restart is
+            // cheap because AddfParticipantVersionWorker presence-skips versions already written.
+            finish("app=" + appId + ", mode=allAccounts, status=FAILED, accountsProcessed=" + numAccounts +
+                    ", versionsEnqueued=" + totalEnqueued + ", error=" + ex.getMessage());
+            throw ex;
         }
 
-        finish("app=" + appId + ", mode=allAccounts, totalAccounts=" + numAccounts + ", versionsEnqueued=" +
-                totalEnqueued);
+        finish("app=" + appId + ", mode=allAccounts, status=complete, totalAccounts=" + numAccounts +
+                ", versionsEnqueued=" + totalEnqueued);
     }
 
     /** Targeted mode: backfill only the health codes listed in the backfill bucket at {@code s3Key}. */

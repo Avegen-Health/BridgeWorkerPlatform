@@ -184,6 +184,47 @@ public class AddfParticipantVersionBackfillWorkerProcessorTest {
         verify(mockSqs).sendMessage(eq(QUEUE_URL), contains("\"participantVersion\":7"));
     }
 
+    /**
+     * A page-load failure mid-walk must record progress and then propagate, so SQS redelivers. Swallowing
+     * it would delete the message and leave a silently incomplete backfill.
+     */
+    @Test
+    public void allAccountsMode_paginationFailureRecordsProgressAndRethrows() throws Exception {
+        AccountSummary user1 = account("user1");
+        List<ParticipantVersion> versions = ImmutableList.of(version("hc1", 1));
+        // Iterator yields one account, then blows up loading the next page -- exactly how
+        // AccountSummaryIterator surfaces a page-load IOException.
+        Iterator<AccountSummary> exploding = new Iterator<AccountSummary>() {
+            private int served = 0;
+            @Override public boolean hasNext() {
+                if (served >= 1) {
+                    throw new RuntimeException("Error getting next page for app app: boom");
+                }
+                return true;
+            }
+            @Override public AccountSummary next() {
+                served++;
+                return user1;
+            }
+        };
+
+        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false)).thenReturn(exploding);
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1")).thenReturn(versions);
+
+        try {
+            processor.accept(allAccountsRequest());
+            org.testng.Assert.fail("expected the pagination failure to propagate");
+        } catch (RuntimeException expected) {
+            // expected -- SQS must redeliver rather than treat this as a successful run
+        }
+
+        // The one account reached before the failure was still enqueued...
+        verify(mockSqs, times(1)).sendMessage(eq(QUEUE_URL), anyString());
+        // ...and the partial run is durably recorded rather than vanishing.
+        verify(mockDynamoHelper).writeWorkerLog(
+                eq(AddfParticipantVersionBackfillWorkerProcessor.WORKER_ID), contains("status=FAILED"));
+    }
+
     @Test
     public void allAccountsMode_incompleteVersionIsSkipped() throws Exception {
         ParticipantVersion noHealthCode = mock(ParticipantVersion.class);
