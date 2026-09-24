@@ -10,6 +10,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyZeroInteractions;
 import static org.mockito.Mockito.when;
 
+import java.util.Iterator;
+import java.util.List;
+
 import com.amazonaws.services.sqs.AmazonSQS;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.collect.ImmutableList;
@@ -67,6 +70,9 @@ public class AddfParticipantVersionBackfillWorkerProcessorTest {
         return DefaultObjectMapper.INSTANCE.readTree("{\"appId\":\"" + APP_ID + "\"}");
     }
 
+    // NOTE: never call these inside a thenReturn(...) expression. They stub, and stubbing
+    // while an outer when(...) is still open makes Mockito abort with UnfinishedStubbing.
+    // Build the fixtures into locals first, then stub.
     private static ParticipantVersion version(String healthCode, int versionNum) {
         ParticipantVersion pv = mock(ParticipantVersion.class);
         when(pv.getHealthCode()).thenReturn(healthCode);
@@ -84,13 +90,16 @@ public class AddfParticipantVersionBackfillWorkerProcessorTest {
 
     @Test
     public void listMode_enqueuesEveryVersionPerHealthCode() throws Exception {
+        List<ParticipantVersion> hc1Versions = ImmutableList.of(version("hc1", 1), version("hc1", 2));
+        List<ParticipantVersion> hc2Versions = ImmutableList.of(version("hc2", 1));
+
         // Blank/whitespace entries are skipped; " hc2 " is trimmed.
         when(mockS3Helper.readS3FileAsLines(BACKFILL_BUCKET, S3_KEY))
                 .thenReturn(ImmutableList.of("hc1", " hc2 ", ""));
         when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "healthCode:hc1"))
-                .thenReturn(ImmutableList.of(version("hc1", 1), version("hc1", 2)));
+                .thenReturn(hc1Versions);
         when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "healthCode:hc2"))
-                .thenReturn(ImmutableList.of(version("hc2", 1)));
+                .thenReturn(hc2Versions);
 
         processor.accept(listRequest());
 
@@ -127,12 +136,13 @@ public class AddfParticipantVersionBackfillWorkerProcessorTest {
 
     @Test
     public void allAccountsMode_enumeratesAccountsAndNeverTouchesS3() throws Exception {
-        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false))
-                .thenReturn(ImmutableList.of(account("user1"), account("user2")).iterator());
-        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1"))
-                .thenReturn(ImmutableList.of(version("hc1", 1), version("hc1", 2)));
-        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user2"))
-                .thenReturn(ImmutableList.of(version("hc2", 1)));
+        Iterator<AccountSummary> accounts = ImmutableList.of(account("user1"), account("user2")).iterator();
+        List<ParticipantVersion> user1Versions = ImmutableList.of(version("hc1", 1), version("hc1", 2));
+        List<ParticipantVersion> user2Versions = ImmutableList.of(version("hc2", 1));
+
+        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false)).thenReturn(accounts);
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1")).thenReturn(user1Versions);
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user2")).thenReturn(user2Versions);
 
         processor.accept(allAccountsRequest());
 
@@ -147,10 +157,11 @@ public class AddfParticipantVersionBackfillWorkerProcessorTest {
     public void allAccountsMode_blankS3KeySelectsWholeApp() throws Exception {
         JsonNode blankKey = DefaultObjectMapper.INSTANCE.readTree(
                 "{\"appId\":\"" + APP_ID + "\",\"s3Key\":\"   \"}");
-        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false))
-                .thenReturn(ImmutableList.of(account("user1")).iterator());
-        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1"))
-                .thenReturn(ImmutableList.of(version("hc1", 1)));
+        Iterator<AccountSummary> accounts = ImmutableList.of(account("user1")).iterator();
+        List<ParticipantVersion> versions = ImmutableList.of(version("hc1", 1));
+
+        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false)).thenReturn(accounts);
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1")).thenReturn(versions);
 
         processor.accept(blankKey);
 
@@ -160,10 +171,11 @@ public class AddfParticipantVersionBackfillWorkerProcessorTest {
 
     @Test
     public void allAccountsMode_enqueuesHealthCodeFromTheVersionNotTheAccount() throws Exception {
-        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false))
-                .thenReturn(ImmutableList.of(account("user1")).iterator());
-        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1"))
-                .thenReturn(ImmutableList.of(version("hc-from-version", 7)));
+        Iterator<AccountSummary> accounts = ImmutableList.of(account("user1")).iterator();
+        List<ParticipantVersion> versions = ImmutableList.of(version("hc-from-version", 7));
+
+        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false)).thenReturn(accounts);
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1")).thenReturn(versions);
 
         processor.accept(allAccountsRequest());
 
@@ -177,11 +189,11 @@ public class AddfParticipantVersionBackfillWorkerProcessorTest {
         ParticipantVersion noHealthCode = mock(ParticipantVersion.class);
         when(noHealthCode.getHealthCode()).thenReturn(null);
         when(noHealthCode.getParticipantVersion()).thenReturn(1);
+        Iterator<AccountSummary> accounts = ImmutableList.of(account("user1")).iterator();
+        List<ParticipantVersion> versions = ImmutableList.of(noHealthCode, version("hc1", 2));
 
-        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false))
-                .thenReturn(ImmutableList.of(account("user1")).iterator());
-        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1"))
-                .thenReturn(ImmutableList.of(noHealthCode, version("hc1", 2)));
+        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false)).thenReturn(accounts);
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1")).thenReturn(versions);
 
         processor.accept(allAccountsRequest());
 
