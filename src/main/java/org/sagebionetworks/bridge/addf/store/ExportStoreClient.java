@@ -124,6 +124,20 @@ public class ExportStoreClient {
         return ROOT_PREFIX + "keyboard_sessions/month=" + month + "/part-" + snapshotDate + ".parquet";
     }
 
+    /**
+     * Full bucket key for a raw archive from its delivery-root-relative form — the inverse of what {@link #putRaw}
+     * returns and what {@code file_records.file_name} stores: {@code raw/<date>/<rec>-<item>.zip} →
+     * {@code biaffect-3/raw/<date>/<rec>-<item>.zip}.
+     */
+    public String rawKey(String rawRelativeKey) {
+        return ROOT_PREFIX + rawRelativeKey;
+    }
+
+    /** True when an object exists at this full bucket key. */
+    public boolean objectExists(String key) {
+        return s3Client.doesObjectExist(bucket, key);
+    }
+
     /** List the staged per-record object keys under {@code _staging/<table>/} (all stage-date partitions), paged. */
     public List<String> listStaged(String table) {
         return listKeys(STAGING_PREFIX + table + "/");
