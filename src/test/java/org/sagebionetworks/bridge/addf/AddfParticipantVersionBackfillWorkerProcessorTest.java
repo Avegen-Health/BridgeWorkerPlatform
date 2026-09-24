@@ -1,11 +1,13 @@
 package org.sagebionetworks.bridge.addf;
 
 import static org.mockito.Matchers.anyString;
+import static org.mockito.Matchers.contains;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyZeroInteractions;
 import static org.mockito.Mockito.when;
 
 import com.amazonaws.services.sqs.AmazonSQS;
@@ -17,6 +19,8 @@ import org.testng.annotations.Test;
 import org.sagebionetworks.bridge.config.Config;
 import org.sagebionetworks.bridge.json.DefaultObjectMapper;
 import org.sagebionetworks.bridge.rest.exceptions.EntityNotFoundException;
+import org.sagebionetworks.bridge.rest.model.AccountSummary;
+import org.sagebionetworks.bridge.rest.model.ParticipantVersion;
 import org.sagebionetworks.bridge.s3.S3Helper;
 import org.sagebionetworks.bridge.workerPlatform.bridge.BridgeHelper;
 import org.sagebionetworks.bridge.workerPlatform.dynamodb.DynamoHelper;
@@ -54,43 +58,133 @@ public class AddfParticipantVersionBackfillWorkerProcessorTest {
         processor.setAddfSqsClient(mockSqs);
     }
 
-    private static JsonNode requestNode() throws Exception {
+    private static JsonNode listRequest() throws Exception {
         return DefaultObjectMapper.INSTANCE.readTree(
                 "{\"appId\":\"" + APP_ID + "\",\"s3Key\":\"" + S3_KEY + "\"}");
     }
 
+    private static JsonNode allAccountsRequest() throws Exception {
+        return DefaultObjectMapper.INSTANCE.readTree("{\"appId\":\"" + APP_ID + "\"}");
+    }
+
+    private static ParticipantVersion version(String healthCode, int versionNum) {
+        ParticipantVersion pv = mock(ParticipantVersion.class);
+        when(pv.getHealthCode()).thenReturn(healthCode);
+        when(pv.getParticipantVersion()).thenReturn(versionNum);
+        return pv;
+    }
+
+    private static AccountSummary account(String userId) {
+        AccountSummary summary = mock(AccountSummary.class);
+        when(summary.getId()).thenReturn(userId);
+        return summary;
+    }
+
+    // ---- targeted (s3Key) mode ------------------------------------------
+
     @Test
-    public void enumeratesVersionsAndEnqueuesPerHealthCode() throws Exception {
+    public void listMode_enqueuesEveryVersionPerHealthCode() throws Exception {
         // Blank/whitespace entries are skipped; " hc2 " is trimmed.
         when(mockS3Helper.readS3FileAsLines(BACKFILL_BUCKET, S3_KEY))
                 .thenReturn(ImmutableList.of("hc1", " hc2 ", ""));
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "healthCode:hc1"))
+                .thenReturn(ImmutableList.of(version("hc1", 1), version("hc1", 2)));
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "healthCode:hc2"))
+                .thenReturn(ImmutableList.of(version("hc2", 1)));
 
-        // hc1 has versions 1 and 2; hc2 has version 1.
-        when(mockBridgeHelper.getParticipantVersion(APP_ID, "healthCode:hc1", 1)).thenReturn(null);
-        when(mockBridgeHelper.getParticipantVersion(APP_ID, "healthCode:hc1", 2)).thenReturn(null);
-        when(mockBridgeHelper.getParticipantVersion(APP_ID, "healthCode:hc1", 3))
-                .thenThrow(new EntityNotFoundException("no more", ""));
-        when(mockBridgeHelper.getParticipantVersion(APP_ID, "healthCode:hc2", 1)).thenReturn(null);
-        when(mockBridgeHelper.getParticipantVersion(APP_ID, "healthCode:hc2", 2))
-                .thenThrow(new EntityNotFoundException("no more", ""));
-
-        processor.accept(requestNode());
+        processor.accept(listRequest());
 
         verify(mockSqs, times(3)).sendMessage(eq(QUEUE_URL), anyString());
+        verify(mockDynamoHelper).writeWorkerLog(
+                eq(AddfParticipantVersionBackfillWorkerProcessor.WORKER_ID), contains("mode=healthCodeList"));
+    }
+
+    @Test
+    public void listMode_fetchErrorSkipsThatParticipantWithoutEnqueue() throws Exception {
+        when(mockS3Helper.readS3FileAsLines(BACKFILL_BUCKET, S3_KEY)).thenReturn(ImmutableList.of("hc1"));
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "healthCode:hc1"))
+                .thenThrow(new RuntimeException("boom"));
+
+        processor.accept(listRequest());
+
+        verify(mockSqs, never()).sendMessage(anyString(), anyString());
         verify(mockDynamoHelper).writeWorkerLog(
                 eq(AddfParticipantVersionBackfillWorkerProcessor.WORKER_ID), anyString());
     }
 
     @Test
-    public void probeErrorStopsThatParticipantWithoutEnqueue() throws Exception {
+    public void listMode_participantWithNoVersionsIsSkipped() throws Exception {
         when(mockS3Helper.readS3FileAsLines(BACKFILL_BUCKET, S3_KEY)).thenReturn(ImmutableList.of("hc1"));
-        when(mockBridgeHelper.getParticipantVersion(APP_ID, "healthCode:hc1", 1))
-                .thenThrow(new RuntimeException("boom"));
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "healthCode:hc1"))
+                .thenThrow(new EntityNotFoundException("none", ""));
 
-        processor.accept(requestNode());
+        processor.accept(listRequest());
 
         verify(mockSqs, never()).sendMessage(anyString(), anyString());
+    }
+
+    // ---- whole-app mode (the gated CI kickoff) ---------------------------
+
+    @Test
+    public void allAccountsMode_enumeratesAccountsAndNeverTouchesS3() throws Exception {
+        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false))
+                .thenReturn(ImmutableList.of(account("user1"), account("user2")).iterator());
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1"))
+                .thenReturn(ImmutableList.of(version("hc1", 1), version("hc1", 2)));
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user2"))
+                .thenReturn(ImmutableList.of(version("hc2", 1)));
+
+        processor.accept(allAccountsRequest());
+
+        verify(mockSqs, times(3)).sendMessage(eq(QUEUE_URL), anyString());
+        // No health-code list is read in this mode -- that is the whole point.
+        verifyZeroInteractions(mockS3Helper);
         verify(mockDynamoHelper).writeWorkerLog(
-                eq(AddfParticipantVersionBackfillWorkerProcessor.WORKER_ID), anyString());
+                eq(AddfParticipantVersionBackfillWorkerProcessor.WORKER_ID), contains("mode=allAccounts"));
+    }
+
+    @Test
+    public void allAccountsMode_blankS3KeySelectsWholeApp() throws Exception {
+        JsonNode blankKey = DefaultObjectMapper.INSTANCE.readTree(
+                "{\"appId\":\"" + APP_ID + "\",\"s3Key\":\"   \"}");
+        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false))
+                .thenReturn(ImmutableList.of(account("user1")).iterator());
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1"))
+                .thenReturn(ImmutableList.of(version("hc1", 1)));
+
+        processor.accept(blankKey);
+
+        verify(mockSqs, times(1)).sendMessage(eq(QUEUE_URL), anyString());
+        verifyZeroInteractions(mockS3Helper);
+    }
+
+    @Test
+    public void allAccountsMode_enqueuesHealthCodeFromTheVersionNotTheAccount() throws Exception {
+        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false))
+                .thenReturn(ImmutableList.of(account("user1")).iterator());
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1"))
+                .thenReturn(ImmutableList.of(version("hc-from-version", 7)));
+
+        processor.accept(allAccountsRequest());
+
+        // The message must carry the health code off the version, not the account's userId.
+        verify(mockSqs).sendMessage(eq(QUEUE_URL), contains("\"healthCode\":\"hc-from-version\""));
+        verify(mockSqs).sendMessage(eq(QUEUE_URL), contains("\"participantVersion\":7"));
+    }
+
+    @Test
+    public void allAccountsMode_incompleteVersionIsSkipped() throws Exception {
+        ParticipantVersion noHealthCode = mock(ParticipantVersion.class);
+        when(noHealthCode.getHealthCode()).thenReturn(null);
+        when(noHealthCode.getParticipantVersion()).thenReturn(1);
+
+        when(mockBridgeHelper.getAllAccountSummaries(APP_ID, false))
+                .thenReturn(ImmutableList.of(account("user1")).iterator());
+        when(mockBridgeHelper.getAllParticipantVersionsForUser(APP_ID, "user1"))
+                .thenReturn(ImmutableList.of(noHealthCode, version("hc1", 2)));
+
+        processor.accept(allAccountsRequest());
+
+        verify(mockSqs, times(1)).sendMessage(eq(QUEUE_URL), anyString());
     }
 }
