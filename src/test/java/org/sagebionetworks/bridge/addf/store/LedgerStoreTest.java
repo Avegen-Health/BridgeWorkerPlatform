@@ -63,4 +63,47 @@ public class LedgerStoreTest {
         verify(mockS3).putObject(captor.capture());
         return captor.getValue();
     }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Raw scope (§4.3.4) — health-code-keyed, because it is the only surviving index from a participant to the
+    // archives of theirs that have left the AWS account once withdrawal compaction deletes their file_records rows.
+    // -----------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void markRawDeliveredWritesHealthCodeScopedKey() {
+        ledger.markRawDelivered("hc-1", "raw/2026-08-15/rec-1-PHQ-9.zip");
+
+        assertEquals(capturePut().getKey(), "biaffect-3/_ledger/raw/hc-1/2026-08-15/rec-1-PHQ-9.zip");
+    }
+
+    @Test
+    public void containsRawProbesTheSameKeyMarkWrote() {
+        // The write and the read are separate code paths over the same key shape; if they ever disagree, every
+        // archive re-uploads on every run and nothing fails loudly. Pin them against each other.
+        String key = ledger.rawLedgerKey("hc-1", "raw/2026-08-15/rec-1-PHQ-9.zip");
+        ledger.markRawDelivered("hc-1", "raw/2026-08-15/rec-1-PHQ-9.zip");
+        assertEquals(capturePut().getKey(), key);
+
+        when(mockS3.doesObjectExist(BUCKET, key)).thenReturn(true);
+        assertTrue(ledger.containsRaw("hc-1", "raw/2026-08-15/rec-1-PHQ-9.zip"));
+        assertFalse(ledger.containsRaw("hc-2", "raw/2026-08-15/rec-1-PHQ-9.zip"));
+    }
+
+    @Test
+    public void rawLedgerKeyIsToleratantOfAMissingRawPrefix() {
+        // file_records.file_name always carries the raw/ prefix, but the ledger must not produce a different key
+        // shape if a caller ever passes the bare relative path.
+        assertEquals(ledger.rawLedgerKey("hc-1", "2026-08-15/rec-1.zip"),
+                ledger.rawLedgerKey("hc-1", "raw/2026-08-15/rec-1.zip"));
+    }
+
+    @Test
+    public void rawScopeCannotCollideWithRecordOrVersionScopes() {
+        ledger.markRawDelivered("hc-1", "raw/2026-08-15/rec-1-PHQ-9.zip");
+        String rawKey = capturePut().getKey();
+
+        assertFalse(rawKey.startsWith("biaffect-3/_ledger/record/"));
+        assertFalse(rawKey.startsWith("biaffect-3/_ledger/version/"));
+        assertTrue(rawKey.startsWith("biaffect-3/_ledger/raw/"));
+    }
 }

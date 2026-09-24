@@ -3,11 +3,11 @@ package org.sagebionetworks.bridge.addf.publish;
 import java.io.File;
 
 /**
- * One consolidated table file (re)written by {@link SnapshotDeltaBuilder} during a publish run, paired with the local
- * temp file that holds its bytes. The {@code key} is the object's path <b>relative to the export-store bucket root</b>
- * (e.g. {@code biaffect-3/current/tables/phq9.parquet}) — and, because the Azure staging container mirrors the same
- * delivery tree, it doubles as the destination blob path. The delta is exactly this set: the publish worker uploads
- * each {@link #getLocalFile()} to the Azure blob at {@link #getKey()} (§4.4).
+ * One object to upload to the Azure staging container during a publish run, paired with the local file holding its
+ * bytes — either a consolidated table file / keyboard month part written by {@link SnapshotDeltaBuilder}, or a raw
+ * upload archive streamed from the export store by {@link RawArchiveDelivery}. The {@code key} is the object's path
+ * <b>relative to the export-store bucket root</b> (e.g. {@code biaffect-3/current/tables/phq9.parquet}) — and, because
+ * the Azure staging container mirrors the same delivery tree, it doubles as the destination blob path (§4.4).
  */
 public final class PublishedBlob {
     private final String key;
@@ -23,7 +23,7 @@ public final class PublishedBlob {
         return key;
     }
 
-    /** Local temp file holding the (re)written Parquet bytes for this blob. */
+    /** Local file holding this blob's bytes — a written Parquet file, or a downloaded raw archive. */
     public File getLocalFile() {
         return localFile;
     }

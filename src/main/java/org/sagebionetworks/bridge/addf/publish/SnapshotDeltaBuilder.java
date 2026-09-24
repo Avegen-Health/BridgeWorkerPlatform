@@ -44,6 +44,22 @@ import org.sagebionetworks.bridge.file.FileHelper;
  * (Historical month-partitioned keyboard parts are compacted by the optional periodic compaction pass of §4.3.2, not
  * this daily publish.)</p>
  *
+ * <p><b>Raw layer (§4.3.4):</b> this class does <b>not</b> move raw archives. It only names them — every
+ * {@code file_records} row it newly consolidates yields a {@link RawCandidate}, and {@link RawArchiveDelivery}
+ * streams those to Azure separately. Because a candidate is produced only for a row that cleared the tombstone and
+ * orphan gates below, the raw layer inherits the table layer's consent filtering by construction. Two properties are
+ * worth stating plainly, because the earlier design of this feature got both wrong: candidates come from rows
+ * consolidated <i>by this run</i> (never a rescan of the whole table, which would make every publish O(all records
+ * ever)), and the archives stay out of the delta (megabyte payloads must not accumulate on the worker's root volume
+ * before anything uploads).</p>
+ *
+ * <p><b>Withdrawal does not reach an archive that already shipped.</b> Tables are overwrite-in-place, so compaction
+ * propagates a withdrawal to the partner on the next publish. Raw delivery is append-only — there is no blob-delete
+ * path — so an archive delivered before the withdrawal stays in the partner's container. That is an accepted,
+ * documented limitation, not an oversight; {@code LedgerStore}'s health-code-keyed raw scope exists so the delivered
+ * set stays enumerable for a manual erasure request. Do not describe the raw layer as inheriting tombstone
+ * compaction without that caveat.</p>
+ *
  * <p><b>Crash-safety (§4.5):</b> {@code build} writes the consolidated files (idempotent overwrite-in-place) but does
  * not consume staging or clear tombstones — that is {@code commit}'s job, and the worker calls {@code commit} only
  * after the Azure upload confirms. A crash or upload failure before {@code commit} leaves staging + tombstones intact,
@@ -52,6 +68,9 @@ import org.sagebionetworks.bridge.file.FileHelper;
 @Component
 public class SnapshotDeltaBuilder {
     private static final Logger LOG = LoggerFactory.getLogger(SnapshotDeltaBuilder.class);
+
+    /** {@code file_records.file_name} is stored relative to the delivery root, e.g. {@code raw/2026-08-15/rec-PHQ-9.zip}. */
+    private static final String RAW_RELATIVE_PREFIX = "raw/";
 
     /** Single-file, record-keyed tables coalesced by {@code record_id} (activity survey/task tables + file_records). */
     private static final List<String> RECORD_KEYED_TABLES = ImmutableList.of(
@@ -109,8 +128,14 @@ public class SnapshotDeltaBuilder {
         }
 
         // 3) record-keyed single-file tables (activity + file_records), orphan-deferred + tombstone-compacted.
+        // file_records additionally yields this run's raw-archive candidates (§4.3.4): the archives belonging to the
+        // rows this run actually consolidated. Only newly-consolidated rows qualify — publish must not rescan the
+        // whole table for undelivered archives, which would make every run O(all records ever) and starve current
+        // data behind the historical backlog. History is drained separately via the pending-raw queue.
+        List<RawCandidate> rawCandidates = new ArrayList<>();
         for (String table : RECORD_KEYED_TABLES) {
-            buildRecordKeyedTable(table, tempDir, tombstoned, versions.validKeys, delta, consumedStagingKeys);
+            buildRecordKeyedTable(table, tempDir, tombstoned, versions.validKeys, delta, consumedStagingKeys,
+                    AddfTables.FILE_RECORDS.equals(table) ? rawCandidates : null);
         }
 
         // 4) demographics — column-merge by health_code (§3.5.1 / §3.7.2), tombstone-compacted.
@@ -121,14 +146,21 @@ public class SnapshotDeltaBuilder {
 
         // Staging is NOT consumed and tombstones are NOT cleared here — commit() does that, but only AFTER the worker
         // confirms the Azure upload (§4.5), so a crash/upload-failure before commit replays the identical delta.
-        LOG.info("ADDF publish {}: {} consolidated file(s) changed", snapshotDate, delta.size());
-        return new SnapshotDelta(delta, new ArrayList<>(consumedStagingKeys), new ArrayList<>(tombstoned));
+        LOG.info("ADDF publish {}: {} consolidated file(s) changed, {} raw archive candidate(s)", snapshotDate,
+                delta.size(), rawCandidates.size());
+        return new SnapshotDelta(delta, new ArrayList<>(consumedStagingKeys), new ArrayList<>(tombstoned),
+                rawCandidates);
     }
 
     /**
      * Retire the staging objects coalesced into this snapshot and clear the tombstone markers it compacted out — called
      * by the publish worker <b>only after</b> the Azure upload of {@link SnapshotDelta#getBlobs()} has confirmed (§4.5).
      * Split from {@link #build} so an upload failure leaves staging + tombstones in place for an idempotent replay.
+     *
+     * <p><b>Raw delivery must run before this.</b> {@link SnapshotDelta#getRawCandidates()} is derived from the staged
+     * rows this snapshot consumed; once those staging objects are deleted here, the candidate set cannot be
+     * reconstructed. {@link RawArchiveDelivery} therefore runs between the table upload and this call, and parks any
+     * archive it could not ship in the pending-raw queue so the record survives the staging delete.</p>
      */
     public void commit(SnapshotDelta delta) {
         if (!delta.getConsumedStagingKeys().isEmpty()) {
@@ -211,8 +243,9 @@ public class SnapshotDeltaBuilder {
     // ---------------------------------------------------------------------------------------------------------------
     // Record-keyed single-file tables — upsert by record_id, defer orphans, compact tombstones.
     // ---------------------------------------------------------------------------------------------------------------
-    private void buildRecordKeyedTable(String table, File tempDir, Set<String> tombstoned, Set<String> validKeys,
-            List<PublishedBlob> delta, Set<String> consumedStagingKeys) throws IOException {
+    private void buildRecordKeyedTable(String table, File tempDir, Set<String> tombstoned,
+            Set<String> validKeys, List<PublishedBlob> delta, Set<String> consumedStagingKeys,
+            List<RawCandidate> rawCandidates) throws IOException {
         Map<String, TableRow> byRecordId = new LinkedHashMap<>();
         boolean mutated = false;
 
@@ -247,12 +280,29 @@ public class SnapshotDeltaBuilder {
                 byRecordId.put(str(row.get("record_id")), row);
                 consumedStagingKeys.add(key);
                 mutated = true;
+                if (rawCandidates != null) {
+                    addRawCandidate(rawCandidates, row);
+                }
             }
         }
 
         if (mutated) {
             writeConsolidated(table, new ArrayList<>(byRecordId.values()), tempDir, delta);
         }
+    }
+
+    /**
+     * Record one newly-consolidated {@code file_records} row's archive as due for delivery. Called only for rows that
+     * survived the tombstone and orphan gates above, so a withdrawn or not-yet-publishable participant's archive is
+     * never a candidate — the raw layer inherits the table layer's consent filtering by construction.
+     */
+    private static void addRawCandidate(List<RawCandidate> rawCandidates, TableRow row) {
+        String relativeKey = str(row.get("file_name"));
+        String healthCode = str(row.get("health_code"));
+        if (relativeKey == null || healthCode == null || !relativeKey.startsWith(RAW_RELATIVE_PREFIX)) {
+            return;
+        }
+        rawCandidates.add(new RawCandidate(healthCode, relativeKey));
     }
 
     // ---------------------------------------------------------------------------------------------------------------
