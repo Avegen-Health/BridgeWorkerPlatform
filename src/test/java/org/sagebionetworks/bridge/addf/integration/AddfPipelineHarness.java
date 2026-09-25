@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.google.common.base.Charsets;
@@ -258,11 +259,18 @@ class AddfPipelineHarness {
     /** Register a participant version the dimension worker will fetch from Bridge. */
     void stageParticipantVersion(String healthCode, int versionNum, SharingScope scope, List<String> dataGroups)
             throws Exception {
+        stageParticipantVersion(healthCode, versionNum, scope, dataGroups, null);
+    }
+
+    /** As above, with the {@code studyId -> externalId} memberships BS2 holds for the participant. */
+    void stageParticipantVersion(String healthCode, int versionNum, SharingScope scope, List<String> dataGroups,
+            Map<String, String> studyMemberships) throws Exception {
         ParticipantVersion version = new ParticipantVersion();
         version.setHealthCode(healthCode);
         version.setParticipantVersion(versionNum);
         version.setSharingScope(scope);
         version.setDataGroups(dataGroups);
+        version.setStudyMemberships(studyMemberships);
         version.setCreatedOn(DateTime.parse("2026-08-01T00:00:00.000Z"));
         version.setModifiedOn(DateTime.parse("2026-08-01T00:00:00.000Z"));
         when(mockBridgeHelper.getParticipantVersion(APP_ID, "healthCode:" + healthCode, versionNum))

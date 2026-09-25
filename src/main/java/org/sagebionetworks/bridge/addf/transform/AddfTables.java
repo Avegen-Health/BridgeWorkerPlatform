@@ -4,9 +4,11 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaBuilder;
 
@@ -17,7 +19,8 @@ import org.apache.avro.SchemaBuilder;
  *
  * <p>The FAIR dictionary workbook ({@code BiAffect3_FAIR_Metadata_Draft.xlsx}) is the ultimate source of truth — the
  * Phase 7 conformance test parses it and asserts these definitions match. If the workbook and this class disagree,
- * the workbook wins and this class is updated.</p>
+ * the workbook wins and this class is updated. The one deliberate exception is
+ * {@link #PII_WITHHELD_PARTICIPANT_FIELDS}: a schema the workbook defines is still not a licence to deliver PII.</p>
  *
  * <p>All fields are emitted as nullable Avro unions {@code ["null", <type>]}: a partial demographics row, a missing
  * summary, or an absent optional annotation must serialise as null rather than fail the write.</p>
@@ -37,6 +40,22 @@ public final class AddfTables {
     public static final String PARTICIPANTS_CURRENT = "participants_current";
     // Raw-layer index — one row per uploaded record, always emitted.
     public static final String FILE_RECORDS = "file_records";
+
+    /**
+     * The two columns the FAIR workbook declares for {@code participant_versions} / {@code participants_current} that
+     * we deliberately do <b>not</b> deliver. Both carry the account's {@code externalId} — the enrolment identifier
+     * the site chooses, in practice a person's name ({@code study_memberships} carries it verbatim inside
+     * {@code |studyId=externalId|}). {@code externalId} is Class A PII, which must never appear in a
+     * researcher-visible export, and the delivery README promises ADDI that the participant is identified only by the
+     * de-identified {@code health_code}; shipping either column defeats that promise.
+     *
+     * <p>Nothing analytical is lost: {@code study_id} keeps the study dimension (derived from the membership keys, not
+     * the values) and {@code (health_code, participant_version)} keeps every join. The workbook remains the schema
+     * authority for everything else — {@code AddfTablesFairConformanceTest} subtracts exactly this set from the
+     * workbook's participant fields before comparing, so any <em>other</em> divergence still fails.</p>
+     */
+    public static final Set<String> PII_WITHHELD_PARTICIPANT_FIELDS =
+            ImmutableSet.of("external_id", "study_memberships");
 
     private static final Map<String, List<Column>> COLUMNS;
     static {
@@ -174,16 +193,16 @@ public final class AddfTables {
                 Column.of("other_illness", ColumnType.TEXT),
                 Column.of("collected_on", ColumnType.DATETIME)));
 
+        // 9 of the workbook's 11 participant columns — external_id and study_memberships are withheld, see
+        // PII_WITHHELD_PARTICIPANT_FIELDS below.
         List<Column> participantVersionCols = ImmutableList.of(
                 Column.of("health_code", ColumnType.TEXT),
                 Column.of("participant_version", ColumnType.INTEGER),
                 Column.of("study_id", ColumnType.TEXT),
-                Column.of("external_id", ColumnType.TEXT),
                 Column.of("sharing_scope", ColumnType.TEXT),
                 Column.of("data_groups", ColumnType.TEXT),
                 Column.of("languages", ColumnType.TEXT),
                 Column.of("client_time_zone", ColumnType.TEXT),
-                Column.of("study_memberships", ColumnType.TEXT),
                 Column.of("created_on", ColumnType.DATETIME),
                 Column.of("modified_on", ColumnType.DATETIME));
         m.put(PARTICIPANT_VERSIONS, participantVersionCols);

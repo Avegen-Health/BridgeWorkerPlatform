@@ -71,6 +71,10 @@ public class SnapshotDeltaBuilderEdgeCasesTest {
         when(mockReader.read(anyString(), any(File.class)))
                 .thenAnswer(inv -> rowsByFileName.getOrDefault(inv.getArgumentAt(1, File.class).getName(),
                         ImmutableList.<TableRow>of()));
+        // Default: the consolidated participant_versions in the store was written under the current column list, so
+        // the schema-drift rewrite does not fire. The one test that wants drift overrides this.
+        when(mockReader.readColumnNames(any(File.class)))
+                .thenReturn(AddfTables.columnNames(AddfTables.PARTICIPANT_VERSIONS));
         when(mockWriter.writeAll(anyString(), anyList(), any(File.class)))
                 .thenAnswer(inv -> inv.getArgumentAt(2, File.class));
 
@@ -79,6 +83,46 @@ public class SnapshotDeltaBuilderEdgeCasesTest {
         builder.setParquetRowWriter(mockWriter);
         builder.setParquetTableReader(mockReader);
         builder.setFileHelper(mockFileHelper);
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Schema drift: a published file written under an older column list must not survive it
+    // -----------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void consolidatedFileWrittenUnderAnOlderColumnListIsRewrittenWithNothingElseChanged() throws Exception {
+        // The PII fix (external_id / study_memberships withheld) only reaches ADDI's container if the already-
+        // published file is rewritten. Nothing is staged and nobody withdrew, so without the drift check this
+        // snapshot is a no-op and the retired columns sit in the delivery tree until the next version happens to
+        // arrive — which, on a quiet study, can be never.
+        when(mockStore.consolidatedExists(AddfTables.PARTICIPANT_VERSIONS)).thenReturn(true);
+        List<String> staleColumns = ImmutableList.<String>builder()
+                .addAll(AddfTables.columnNames(AddfTables.PARTICIPANT_VERSIONS))
+                .addAll(AddfTables.PII_WITHHELD_PARTICIPANT_FIELDS)
+                .build();
+        when(mockReader.readColumnNames(any(File.class))).thenReturn(staleColumns);
+        rowsByFileName.put("participant_versions-existing.parquet",
+                ImmutableList.of(versionRow("hc-1", 1), versionRow("hc-1", 2)));
+
+        builder.build(SNAPSHOT_DATE, tempDir);
+
+        // Both rows survive — this is a re-serialisation under the current schema, not a deletion. The writer takes
+        // its columns from AddfTables, so the withheld ones are gone by construction.
+        List<TableRow> written = captureWritten(AddfTables.PARTICIPANT_VERSIONS);
+        assertEquals(written.size(), 2);
+        assertEquals(captureWritten(AddfTables.PARTICIPANTS_CURRENT).size(), 1,
+                "participants_current must be regenerated from the rewritten dimension, not left stale");
+    }
+
+    @Test
+    public void matchingColumnListLeavesTheConsolidatedFileAlone() throws Exception {
+        // The mirror of the above: the drift check must not turn every quiet snapshot into a full rewrite.
+        when(mockStore.consolidatedExists(AddfTables.PARTICIPANT_VERSIONS)).thenReturn(true);
+        rowsByFileName.put("participant_versions-existing.parquet", ImmutableList.of(versionRow("hc-1", 1)));
+
+        builder.build(SNAPSHOT_DATE, tempDir);
+
+        verify(mockWriter, never()).writeAll(eq(AddfTables.PARTICIPANT_VERSIONS), anyList(), any(File.class));
     }
 
     // -----------------------------------------------------------------------------------------------------------

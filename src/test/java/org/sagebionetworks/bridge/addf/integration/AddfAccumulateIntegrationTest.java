@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import org.joda.time.DateTime;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
@@ -35,6 +36,8 @@ public class AddfAccumulateIntegrationTest {
     private static final String STAGING = "biaffect-3/_staging/";
     private static final String LEDGER = "biaffect-3/_ledger/";
     private static final String CLIENT_INFO = "biaffect-3/68 (iPhone 11 Pro; iOS/26.5.2)";
+    /** Shaped like the external IDs uat actually holds — a person's name, which is exactly why it is not delivered. */
+    private static final String EXTERNAL_ID = "Jane_Doe1:biaffect-3-study";
     private static final DateTime CREATED_ON = DateTime.parse("2026-08-15T20:00:48.713Z");
 
     private AddfPipelineHarness harness;
@@ -191,7 +194,9 @@ public class AddfAccumulateIntegrationTest {
 
     @Test
     public void participantVersionMessageStagesTheDimensionRow() throws Exception {
-        harness.stageParticipantVersion("hc-1", 2, SharingScope.SPONSORS_AND_PARTNERS, ImmutableList.of("biaffect-3"));
+        // The snapshot is enrolled with an external ID, the way a site-enrolled participant actually arrives.
+        harness.stageParticipantVersion("hc-1", 2, SharingScope.SPONSORS_AND_PARTNERS, ImmutableList.of("biaffect-3"),
+                ImmutableMap.of("biaffect-3-study", EXTERNAL_ID));
 
         harness.runVersion("hc-1", 2);
 
@@ -203,7 +208,17 @@ public class AddfAccumulateIntegrationTest {
         assertEquals(row.get("health_code"), "hc-1");
         assertEquals(row.get("participant_version"), 2L);
         assertEquals(row.get("sharing_scope"), "sponsors_and_partners");
-        assertEquals(AddfTables.columnsFor(AddfTables.PARTICIPANT_VERSIONS).size(), 11);
+        // The study survives — it comes from the membership key. The external ID (the value) does not, in any column.
+        assertEquals(row.get("study_id"), "biaffect-3-study");
+        assertFalse(row.getValues().values().contains(EXTERNAL_ID), row.getValues().toString());
+
+        // Read the schema out of the Parquet footer the worker actually wrote, not out of our own column list: the
+        // file that would reach ADDI must not declare the withheld columns at all.
+        List<String> columns = harness.parquetTableReader.readColumnNames(stagedFile(staged.get(0)));
+        assertEquals(columns, AddfTables.columnNames(AddfTables.PARTICIPANT_VERSIONS));
+        for (String withheld : AddfTables.PII_WITHHELD_PARTICIPANT_FIELDS) {
+            assertFalse(columns.contains(withheld), "staged dimension file declares withheld column " + withheld);
+        }
 
         assertTrue(harness.s3.exists(BUCKET, LEDGER + "version/hc-1/2"));
     }
@@ -274,12 +289,17 @@ public class AddfAccumulateIntegrationTest {
     private List<TableRow> allStagedRows(String table) throws Exception {
         List<TableRow> rows = new ArrayList<>();
         for (String key : stagedKeys(table)) {
-            File local = File.createTempFile("addf-staged", ".parquet");
-            local.deleteOnExit();
-            java.nio.file.Files.write(local.toPath(), harness.s3.get(BUCKET, key));
-            rows.addAll(harness.parquetTableReader.read(table, local));
+            rows.addAll(harness.parquetTableReader.read(table, stagedFile(key)));
         }
         return rows;
+    }
+
+    /** The staged object's bytes as a local file, so a test can read the Parquet footer as well as the rows. */
+    private File stagedFile(String key) throws Exception {
+        File local = File.createTempFile("addf-staged", ".parquet");
+        local.deleteOnExit();
+        java.nio.file.Files.write(local.toPath(), harness.s3.get(BUCKET, key));
+        return local;
     }
 
     private TableRow onlyStagedRow(String table) throws Exception {

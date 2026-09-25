@@ -232,6 +232,7 @@ public class ManifestGateTest {
     public void columnCountsMatchTheContractedShape() {
         // The plan pins 29/19/14/15/19/14/8/11/11/15. The gate asserts the full ordered name list rather than these
         // numbers (a second hardcoded copy would drift independently) — this test is the one place they're checked.
+        // The participant tables deliver 9 of their 11: PII_WITHHELD_PARTICIPANT_FIELDS is subtracted on PII grounds.
         assertColumnCount(AddfTables.KEYBOARD_SESSIONS, 29);
         assertColumnCount(AddfTables.PHQ9, 19);
         assertColumnCount(AddfTables.SELF_RATING, 14);
@@ -239,8 +240,8 @@ public class ManifestGateTest {
         assertColumnCount(AddfTables.GO_NO_GO, 19);
         assertColumnCount(AddfTables.TRAIL_MAKING, 14);
         assertColumnCount(AddfTables.DEMOGRAPHICS, 8);
-        assertColumnCount(AddfTables.PARTICIPANT_VERSIONS, 11);
-        assertColumnCount(AddfTables.PARTICIPANTS_CURRENT, 11);
+        assertColumnCount(AddfTables.PARTICIPANT_VERSIONS, 11 - AddfTables.PII_WITHHELD_PARTICIPANT_FIELDS.size());
+        assertColumnCount(AddfTables.PARTICIPANTS_CURRENT, 11 - AddfTables.PII_WITHHELD_PARTICIPANT_FIELDS.size());
         assertColumnCount(AddfTables.FILE_RECORDS, 15);
     }
 

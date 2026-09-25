@@ -161,13 +161,26 @@ public class GoldenFlattenerTest {
                 AddfTables.GO_NO_GO, AddfTables.TRAIL_MAKING, AddfTables.DEMOGRAPHICS,
                 AddfTables.PARTICIPANT_VERSIONS, AddfTables.PARTICIPANTS_CURRENT, AddfTables.FILE_RECORDS)) {
             File file = resourceToFile(TABLES_PREFIX + table + ".parquet", table + ".parquet");
-            assertEquals(parquetTableReader.readColumnNames(file), AddfTables.columnNames(table),
+            assertEquals(withoutWithheld(parquetTableReader.readColumnNames(file)), AddfTables.columnNames(table),
                     "golden " + table + ".parquet schema");
         }
         File keyboard = resourceToFile(TABLES_PREFIX + "keyboard_sessions/month=2026-08/part-0001.parquet",
                 "keyboard-part.parquet");
         assertEquals(parquetTableReader.readColumnNames(keyboard),
                 AddfTables.columnNames(AddfTables.KEYBOARD_SESSIONS), "golden keyboard part schema");
+    }
+
+    /**
+     * A golden's columns minus the ones we withhold. The goldens are Sage's real delivery and still declare
+     * {@code external_id} / {@code study_memberships} — empty in every golden row, which is the other half of the
+     * argument for dropping them. Our contract deliberately does not declare them (see
+     * {@link AddfTables#PII_WITHHELD_PARTICIPANT_FIELDS}); subtracting keeps the rest of the comparison exact, so a
+     * genuinely stale fixture still fails.
+     */
+    private static List<String> withoutWithheld(List<String> columns) {
+        List<String> kept = new ArrayList<>(columns);
+        kept.removeAll(AddfTables.PII_WITHHELD_PARTICIPANT_FIELDS);
+        return kept;
     }
 
     // -----------------------------------------------------------------------------------------------------------

@@ -33,6 +33,10 @@ import org.testng.annotations.Test;
  * <p>When the workbook legitimately changes, refresh the copy under {@code src/test/resources/addf/} from
  * {@code wiki/proposals/addf-export/assets/} and update {@link AddfTables} until this test passes again — in that
  * order.</p>
+ *
+ * <p><b>One subtraction.</b> {@link AddfTables#PII_WITHHELD_PARTICIPANT_FIELDS} is removed from the workbook's
+ * participant fields before comparing. The workbook defines the schema; it does not authorise delivering PII, and
+ * these two columns carry the account's external ID. Everything else still has to match exactly.</p>
  */
 public class AddfTablesFairConformanceTest {
     private static final String WORKBOOK_RESOURCE = "/addf/BiAffect3_FAIR_Metadata_Draft.xlsx";
@@ -120,6 +124,8 @@ public class AddfTablesFairConformanceTest {
             }
             List<Column> actual = AddfTables.columnsFor(table);
 
+            expected = deliverable(table, expected);
+
             List<String> expectedNames = new ArrayList<>();
             for (Field field : expected) {
                 expectedNames.add(field.name);
@@ -168,6 +174,37 @@ public class AddfTablesFairConformanceTest {
         List<String> versions = namesOf(AddfTables.PARTICIPANT_VERSIONS);
         List<String> current = namesOf(AddfTables.PARTICIPANTS_CURRENT);
         assertEquals(current, versions);
+    }
+
+    @Test
+    public void theWithheldPiiFieldsAreNeverDeclaredOnAnyTable() {
+        // The subtraction in deliverable() is scoped to the two participant tables; this makes the stronger claim the
+        // PR actually promises — external_id / study_memberships are not delivered anywhere, under any table.
+        for (String table : AddfTables.allTables()) {
+            for (String withheld : AddfTables.PII_WITHHELD_PARTICIPANT_FIELDS) {
+                assertTrue(!AddfTables.columnNames(table).contains(withheld),
+                        table + " declares withheld PII column " + withheld);
+            }
+        }
+    }
+
+    /**
+     * The workbook's fields for {@code table}, minus the ones we deliberately withhold. Scoped to the participant
+     * tables: the same subtraction applied blindly everywhere would quietly excuse a same-named column going missing
+     * from some other table. If the workbook is ever updated to drop these fields too, this becomes a no-op rather
+     * than a failure.
+     */
+    private static List<Field> deliverable(String table, List<Field> fields) {
+        if (!AddfTables.PARTICIPANT_VERSIONS.equals(table) && !AddfTables.PARTICIPANTS_CURRENT.equals(table)) {
+            return fields;
+        }
+        List<Field> kept = new ArrayList<>();
+        for (Field field : fields) {
+            if (!AddfTables.PII_WITHHELD_PARTICIPANT_FIELDS.contains(field.name)) {
+                kept.add(field);
+            }
+        }
+        return kept;
     }
 
     private void assertFairCount(String table, int expected) {
