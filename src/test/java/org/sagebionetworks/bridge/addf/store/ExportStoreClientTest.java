@@ -23,6 +23,7 @@ import org.mockito.ArgumentCaptor;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import org.sagebionetworks.bridge.addf.transform.AddfTables;
 import org.sagebionetworks.bridge.config.Config;
 
 public class ExportStoreClientTest {
@@ -111,8 +112,22 @@ public class ExportStoreClientTest {
     @Test
     public void consolidatedAndKeyboardKeys() {
         assertEquals(client.consolidatedKey("phq9"), "biaffect-3/current/tables/phq9.parquet");
+        // keyboard_sessions is a partitioned dataset but still one of the ten delivered tables, so its parts live
+        // under current/tables/ alongside the single-file tables — not one level up at the delivery root.
         assertEquals(client.keyboardPartKey("2026-08", "2026-09-22"),
-                "biaffect-3/keyboard_sessions/month=2026-08/part-2026-09-22.parquet");
+                "biaffect-3/current/tables/keyboard_sessions/month=2026-08/part-2026-09-22.parquet");
+    }
+
+    /** Every delivered table — single-file and partitioned alike — is reachable under the one current/tables/ prefix. */
+    @Test
+    public void everyDeliveredTableSharesTheCurrentTablesPrefix() {
+        String prefix = "biaffect-3/current/tables/";
+        for (String table : AddfTables.allTables()) {
+            String key = AddfTables.KEYBOARD_SESSIONS.equals(table)
+                    ? client.keyboardPartKey("2026-08", "2026-09-22")
+                    : client.consolidatedKey(table);
+            assertTrue(key.startsWith(prefix + table), table + " not under " + prefix + ": " + key);
+        }
     }
 
     @Test

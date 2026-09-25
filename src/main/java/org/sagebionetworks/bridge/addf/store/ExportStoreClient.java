@@ -18,6 +18,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import org.sagebionetworks.bridge.addf.transform.AddfDateUtils;
+import org.sagebionetworks.bridge.addf.transform.AddfTables;
 import org.sagebionetworks.bridge.config.Config;
 
 /**
@@ -74,7 +75,7 @@ public class ExportStoreClient {
      * version is immutable, so a repeat key is a harmless overwrite of identical content.
      */
     public void stageVersionRow(String healthCode, int participantVersion, File parquetFile) {
-        String key = ROOT_PREFIX + "_staging/" + org.sagebionetworks.bridge.addf.transform.AddfTables.PARTICIPANT_VERSIONS
+        String key = ROOT_PREFIX + "_staging/" + AddfTables.PARTICIPANT_VERSIONS
                 + "/" + AddfDateUtils.todayUtcDate() + "/" + healthCode + "_" + participantVersion + ".parquet";
         putFile(key, parquetFile);
         LOG.info("ADDF staged participant_version: healthCode={} version={} key={}", healthCode, participantVersion,
@@ -120,9 +121,19 @@ public class ExportStoreClient {
         return ROOT_PREFIX + CURRENT_TABLES_PREFIX + table + ".parquet";
     }
 
-    /** The keyboard part-file key for a month + publish label: {@code biaffect-3/keyboard_sessions/month=YYYY-MM/part-<snapshotDate>.parquet} (§4.3.2). */
+    /**
+     * The keyboard part-file key for a month + publish label:
+     * {@code biaffect-3/current/tables/keyboard_sessions/month=YYYY-MM/part-<snapshotDate>.parquet} (§4.3.2).
+     *
+     * <p>Sits under {@code current/tables/} like every other table — {@code keyboard_sessions} is a month-partitioned
+     * <i>dataset</i> rather than a single file, but it is still one of the ten delivered tables and readers treat the
+     * folder as one table. It previously hung off the delivery root, one level up, so a consumer pointed at
+     * {@code current/tables/} (the stable path the delivery format tells researchers to use) silently saw nine tables
+     * and missed the highest-volume one.</p>
+     */
     public String keyboardPartKey(String month, String snapshotDate) {
-        return ROOT_PREFIX + "keyboard_sessions/month=" + month + "/part-" + snapshotDate + ".parquet";
+        return ROOT_PREFIX + CURRENT_TABLES_PREFIX + AddfTables.KEYBOARD_SESSIONS + "/month=" + month + "/part-"
+                + snapshotDate + ".parquet";
     }
 
     /**
