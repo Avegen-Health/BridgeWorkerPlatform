@@ -24,6 +24,7 @@ import org.sagebionetworks.bridge.addf.gate.ConsentTestGate;
 import org.sagebionetworks.bridge.addf.gate.ConsentVerdict;
 import org.sagebionetworks.bridge.addf.store.ExportStoreClient;
 import org.sagebionetworks.bridge.addf.store.LedgerStore;
+import org.sagebionetworks.bridge.addf.transform.ClientInfo;
 import org.sagebionetworks.bridge.addf.transform.FileRecordBuilder;
 import org.sagebionetworks.bridge.addf.transform.FlattenContext;
 import org.sagebionetworks.bridge.addf.transform.ParquetRowWriter;
@@ -42,6 +43,10 @@ public class AddfExportWorkerProcessorTest {
     private static final String ITEM = "PHQ-9";
     private static final String RAW_KEY = "raw/2026-08-15/rec-1-PHQ-9.zip";
     private static final DateTime CREATED_ON = new DateTime(2026, 8, 15, 10, 30, 0, DateTimeZone.forOffsetHours(-4));
+    /** What Bridge actually returns from {@code getClientInfo()} — a JSON object, not a user-agent string. */
+    private static final String CLIENT_INFO_JSON = "{\"appName\":\"biaffect-3\",\"appVersion\":68,"
+            + "\"deviceName\":\"iPhone 11 Pro\",\"osName\":\"iPhone OS\",\"osVersion\":\"26.5.2\"}";
+    private static final String USER_AGENT = "biaffect-3/68 (iPhone 11 Pro; iOS/26.5.2)";
 
     private BridgeHelper mockBridgeHelper;
     private ConsentTestGate mockGate;
@@ -84,7 +89,8 @@ public class AddfExportWorkerProcessorTest {
         mockRecord = mock(HealthDataRecordEx3.class);
         when(mockRecord.getHealthCode()).thenReturn(HEALTH_CODE);
         when(mockRecord.getCreatedOn()).thenReturn(CREATED_ON);
-        when(mockRecord.getClientInfo()).thenReturn("biaffect-3/68 (iPhone 11 Pro; iOS/26.5.2)");
+        when(mockRecord.getClientInfo()).thenReturn(CLIENT_INFO_JSON);
+        when(mockRecord.getUserAgent()).thenReturn(USER_AGENT);
         when(mockRecord.getParticipantVersion()).thenReturn(3);
 
         mockArchive = mock(DecryptedArchive.class);
@@ -156,6 +162,55 @@ public class AddfExportWorkerProcessorTest {
         verify(mockExportStore).putRaw(eq("2026-08-15"), eq(RECORD_ID), eq(ITEM), any(File.class));
         verify(mockLedger).markRecord(RECORD_ID);
         verify(mockFileHelper).deleteDirRecursively(tempDir);
+    }
+
+    /**
+     * Regression: the worker must resolve ClientInfo from BOTH record fields. It previously passed only the
+     * {@code clientInfo} JSON through the user-agent regex, which matched nothing — so {@code app_version}/
+     * {@code platform} were null on every activity row and {@code app_version}/{@code device_name}/{@code os_name}/
+     * {@code os_version} were null on every {@code file_records} row, in every published snapshot. Asserting on the
+     * FlattenContext handed to the builders is what catches it; the builder-level tests cannot, because they
+     * construct their own ClientInfo.
+     */
+    @Test
+    public void flattenContextCarriesResolvedClientInfo() throws Exception {
+        stubThroughFetch();
+        when(mockFlattener.flattenContent(any(), eq(ITEM))).thenReturn(null);
+        when(mockFileHelper.newFile(tempDir, "file_records.parquet")).thenReturn(new File("fr.parquet"));
+        when(mockFileRecordBuilder.build(any(), eq(ITEM), eq(RAW_KEY), any(String.class)))
+                .thenReturn(new TableRow("file_records", RECORD_ID));
+
+        processor.process(request());
+
+        ArgumentCaptor<FlattenContext> captor = ArgumentCaptor.forClass(FlattenContext.class);
+        verify(mockFileRecordBuilder).build(captor.capture(), eq(ITEM), eq(RAW_KEY), any(String.class));
+        ClientInfo clientInfo = captor.getValue().getClientInfo();
+        assertEquals(clientInfo.getAppVersion(), "68");
+        assertEquals(clientInfo.getDeviceName(), "iPhone 11 Pro");
+        // "iPhone OS" proves the JSON clientInfo was the source (the user agent would have said "iOS").
+        assertEquals(clientInfo.getOsName(), "iPhone OS");
+        assertEquals(clientInfo.getOsVersion(), "26.5.2");
+        assertEquals(clientInfo.getPlatform(), "ios");
+    }
+
+    /** A record with no clientInfo JSON still gets its columns, from the user agent. */
+    @Test
+    public void flattenContextFallsBackToUserAgent() throws Exception {
+        stubThroughFetch();
+        when(mockRecord.getClientInfo()).thenReturn(null);
+        when(mockFlattener.flattenContent(any(), eq(ITEM))).thenReturn(null);
+        when(mockFileHelper.newFile(tempDir, "file_records.parquet")).thenReturn(new File("fr.parquet"));
+        when(mockFileRecordBuilder.build(any(), eq(ITEM), eq(RAW_KEY), any(String.class)))
+                .thenReturn(new TableRow("file_records", RECORD_ID));
+
+        processor.process(request());
+
+        ArgumentCaptor<FlattenContext> captor = ArgumentCaptor.forClass(FlattenContext.class);
+        verify(mockFileRecordBuilder).build(captor.capture(), eq(ITEM), eq(RAW_KEY), any(String.class));
+        ClientInfo clientInfo = captor.getValue().getClientInfo();
+        assertEquals(clientInfo.getAppVersion(), "68");
+        assertEquals(clientInfo.getOsName(), "iOS");
+        assertEquals(clientInfo.getPlatform(), "ios");
     }
 
     @Test

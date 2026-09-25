@@ -33,11 +33,13 @@ public class FileRecordBuilderTest {
         assertEquals(row.get("exported_on"), "2026-08-15T15:00:00.000Z");
         assertNull(row.get("created_on"));
         assertEquals(row.get("content_type"), "application/zip");
-        assertEquals(row.get("user_agent"), "BiAffect/68");
-        assertEquals(row.get("client_info"), AddfTestFixtures.CLIENT_INFO_STRING);
+        assertEquals(row.get("user_agent"), AddfTestFixtures.USER_AGENT);
+        assertEquals(row.get("client_info"), AddfTestFixtures.CLIENT_INFO_JSON);
+        // Derived from the clientInfo JSON, matching the golden file_records preview (os_name = "iPhone OS", the
+        // Apple OS identifier, NOT the user agent's marketing name "iOS").
         assertEquals(row.get("app_version"), "68");
         assertEquals(row.get("device_name"), "iPhone 11 Pro");
-        assertEquals(row.get("os_name"), "iOS");
+        assertEquals(row.get("os_name"), "iPhone OS");
         assertEquals(row.get("os_version"), "26.5.2");
         assertEquals(row.get("file_name"), "raw/2026-08-15/rec-1-PHQ-9.zip");
     }
