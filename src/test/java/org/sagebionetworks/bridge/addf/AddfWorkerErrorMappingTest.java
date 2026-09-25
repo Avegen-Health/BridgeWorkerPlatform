@@ -2,6 +2,7 @@ package org.sagebionetworks.bridge.addf;
 
 import static org.mockito.Matchers.any;
 import static org.mockito.Matchers.anyInt;
+import static org.mockito.Matchers.anyListOf;
 import static org.mockito.Matchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -18,8 +19,11 @@ import org.testng.annotations.Test;
 
 import org.sagebionetworks.bridge.addf.azure.BlobTransport;
 import org.sagebionetworks.bridge.addf.publish.ManifestGate;
+import org.sagebionetworks.bridge.addf.publish.PublishLease;
 import org.sagebionetworks.bridge.addf.publish.PublishMarker;
 import org.sagebionetworks.bridge.addf.publish.PublishedBlob;
+import org.sagebionetworks.bridge.addf.publish.RawArchiveDelivery;
+import org.sagebionetworks.bridge.addf.publish.RawCandidate;
 import org.sagebionetworks.bridge.addf.publish.SnapshotDelta;
 import org.sagebionetworks.bridge.addf.publish.SnapshotDeltaBuilder;
 import org.sagebionetworks.bridge.addf.store.LedgerStore;
@@ -82,6 +86,15 @@ public class AddfWorkerErrorMappingTest {
         publishWorker.setBlobTransport(mock(BlobTransport.class));
         publishWorker.setPublishMarker(mockMarker);
         publishWorker.setFileHelper(mockFileHelper);
+        // The lease and the raw-delivery step sit either side of the upload; both must be wired or publish() NPEs
+        // before it ever reaches the code these tests are about.
+        PublishLease mockLease = mock(PublishLease.class);
+        when(mockLease.acquire(anyString())).thenReturn(true);
+        publishWorker.setPublishLease(mockLease);
+        RawArchiveDelivery mockRawDelivery = mock(RawArchiveDelivery.class);
+        when(mockRawDelivery.deliver(anyListOf(RawCandidate.class), any(File.class)))
+                .thenReturn(new RawArchiveDelivery.Result(0, 0, 0, 0));
+        publishWorker.setRawArchiveDelivery(mockRawDelivery);
         when(mockBuilder.build(anyString(), any(File.class))).thenReturn(
                 new SnapshotDelta(ImmutableList.<PublishedBlob>of(), ImmutableList.<String>of(),
                         ImmutableList.<String>of()));

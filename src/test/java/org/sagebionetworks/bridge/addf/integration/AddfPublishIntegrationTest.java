@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import com.google.common.collect.ImmutableList;
 import org.joda.time.DateTime;
@@ -86,6 +87,9 @@ public class AddfPublishIntegrationTest {
         publishWorker.setSnapshotDeltaBuilder(harness.snapshotDeltaBuilder);
         publishWorker.setManifestGate(harness.manifestGate);
         publishWorker.setBlobTransport(mockTransport);
+        publishWorker.setPublishLease(harness.publishLease);
+        harness.wireRawDelivery(mockTransport);
+        publishWorker.setRawArchiveDelivery(harness.rawArchiveDelivery);
         publishWorker.setPublishMarker(harness.publishMarker);
         publishWorker.setFileHelper(harness.fileHelper);
     }
@@ -308,8 +312,180 @@ public class AddfPublishIntegrationTest {
         assertTrue(delivered, "the deferred row must be delivered once its participant_version exists");
     }
 
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Raw archive delivery — the second layer of the delivery tree, and the most PII-dense artefact we ship
+    // -----------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void rawArchivesAreDeliveredAlongsideTheTables() throws Exception {
+        accumulateFullSnapshot();
+
+        runPublish();
+
+        // Every archive that has a file_records row is shipped, and shipped under the same key the delivery tree
+        // uses — file_records.file_name is the join, so a key that disagrees breaks row -> archive navigation.
+        List<String> rawUploads = rawKeysUploaded();
+        assertEquals(rawUploads.size(), 8, "one archive per upload: " + rawUploads);
+        for (TableRow row : delivered(AddfTables.FILE_RECORDS)) {
+            String expected = "biaffect-3/" + row.get("file_name");
+            assertTrue(rawUploads.contains(expected), "file_records points at an undelivered archive: " + expected);
+        }
+        // Nothing parked: a clean run leaves no retry queue behind.
+        assertTrue(harness.s3.keysUnder(BUCKET, "biaffect-3/_pending_raw/").isEmpty(),
+                "unexpected retry queue: " + harness.s3.keysUnder(BUCKET, "biaffect-3/_pending_raw/"));
+    }
+
+    @Test
+    public void rawDeliveryHasItsOwnKillSwitchThatDoesNotStopTheTables() throws Exception {
+        // The whole point of a separate flag: raw payloads are megabytes of PII where the tables are kilobytes, so
+        // stopping raw mid-incident must not also halt the table delivery the partner already depends on.
+        when(harness.config.get("addf.publish.raw.enabled")).thenReturn("false");
+        accumulateFullSnapshot();
+
+        runPublish();
+
+        assertTrue(rawKeysUploaded().isEmpty(), "raw must not ship when disabled: " + rawKeysUploaded());
+        // ...and the tables still went out, and the day still completed.
+        assertTrue(harness.s3.exists(BUCKET, CURRENT_TABLES + AddfTables.PHQ9 + ".parquet"));
+        assertTrue(harness.s3.exists(BUCKET, "biaffect-3/_publish/" + SNAPSHOT_DATE + ".done"));
+        // Disabled is not deferred: nothing is parked, so flipping the flag back on does not replay a backlog of
+        // archives whose rows were delivered long ago.
+        assertTrue(harness.s3.keysUnder(BUCKET, "biaffect-3/_pending_raw/").isEmpty());
+    }
+
+    @Test
+    public void anArchiveAlreadyDeliveredIsNotShippedTwice() throws Exception {
+        // Raw archives are immutable and expensive. The ledger, not the snapshot, decides whether one has shipped,
+        // so a second publish must not re-upload megabytes that ADDI already holds.
+        accumulateFullSnapshot();
+        runPublish();
+        int firstRunRawCount = rawKeysUploaded().size();
+        assertTrue(firstRunRawCount > 0);
+
+        // A later snapshot with a fresh record: only the new archive ships.
+        uploadedKeys.clear();
+        stagePhq9("rec-phq9-second");
+        harness.runAccumulate("rec-phq9-second");
+        runPublishFor("2026-09-25");
+
+        List<String> secondRunRaw = rawKeysUploaded();
+        assertEquals(secondRunRaw.size(), 1, "only the new archive should ship: " + secondRunRaw);
+        assertTrue(secondRunRaw.get(0).contains("rec-phq9-second"), secondRunRaw.toString());
+    }
+
+    @Test
+    public void archivesOverTheePerRunCapAreParkedNotDropped() throws Exception {
+        // The cap bounds one run's wall clock so it stays inside the publish lease TTL and the queue's visibility
+        // timeout. Everything past it must land in the retry queue — silently dropping would lose the raw layer for
+        // those records permanently, with the tables still claiming the archives exist.
+        when(harness.config.get("addf.publish.raw.max.per.run")).thenReturn("3");
+        accumulateFullSnapshot();
+
+        runPublish();
+
+        assertEquals(rawKeysUploaded().size(), 3, "the cap must bind: " + rawKeysUploaded());
+        assertEquals(harness.s3.keysUnder(BUCKET, "biaffect-3/_pending_raw/").size(), 5,
+                "the overflow must be parked: " + harness.s3.keysUnder(BUCKET, "biaffect-3/_pending_raw/"));
+
+        // Next run drains the parked queue rather than starving it behind new work.
+        uploadedKeys.clear();
+        when(harness.config.get("addf.publish.raw.max.per.run")).thenReturn("500");
+        runPublishFor("2026-09-25");
+
+        assertEquals(rawKeysUploaded().size(), 5, "the parked archives must drain: " + rawKeysUploaded());
+        assertTrue(harness.s3.keysUnder(BUCKET, "biaffect-3/_pending_raw/").isEmpty());
+    }
+
+    @Test
+    public void anUnshippableArchiveIsParkedWithoutBlockingTheTables() throws Exception {
+        // One bad archive must degrade one record, not abort the run — the tables and the marker still complete, and
+        // the archive is queued for the next attempt rather than lost.
+        accumulateFullSnapshot();
+        doAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<PublishedBlob> blobs = (List<PublishedBlob>) invocation.getArguments()[0];
+            for (PublishedBlob blob : blobs) {
+                if (blob.getKey().startsWith("biaffect-3/raw/")) {
+                    throw new RuntimeException("azure rejected the archive");
+                }
+                uploadedKeys.add(blob.getKey());
+            }
+            return null;
+        }).when(mockTransport).upload(anyListOf(PublishedBlob.class));
+
+        runPublish();
+
+        // Tables delivered, day marked done.
+        assertTrue(harness.s3.exists(BUCKET, CURRENT_TABLES + AddfTables.PHQ9 + ".parquet"));
+        assertTrue(harness.s3.exists(BUCKET, "biaffect-3/_publish/" + SNAPSHOT_DATE + ".done"));
+        // Every failed archive parked for retry, none lost.
+        assertEquals(harness.s3.keysUnder(BUCKET, "biaffect-3/_pending_raw/").size(), 8,
+                "failed archives must be parked: " + harness.s3.keysUnder(BUCKET, "biaffect-3/_pending_raw/"));
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Publish lease — the .done marker says "finished", never "running"
+    // -----------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void aSecondConcurrentRunIsRefusedByTheLease() throws Exception {
+        // Two runs read-modify-writing the same consolidated tables silently lose rows, and the .done marker cannot
+        // prevent it because it is only written at the end. The lease is what makes a double trigger safe.
+        accumulateFullSnapshot();
+        assertTrue(harness.publishLease.acquire(SNAPSHOT_DATE), "test setup: lease should be free");
+        try {
+            runPublish();
+
+            // Refused before touching anything: no upload, no marker, and staging untouched for the real holder.
+            assertTrue(uploadedKeys.isEmpty(), "a refused run must not upload: " + uploadedKeys);
+            assertFalse(harness.s3.exists(BUCKET, "biaffect-3/_publish/" + SNAPSHOT_DATE + ".done"));
+            assertFalse(harness.s3.keysUnder(BUCKET, STAGING).isEmpty(), "staging must survive a refused run");
+        } finally {
+            harness.publishLease.release(SNAPSHOT_DATE);
+        }
+    }
+
+    @Test
+    public void theLeaseIsReleasedSoTheNextRunCanProceed() throws Exception {
+        // A lease that outlives its run would wedge publish until its TTL expired — worse than the race it prevents.
+        accumulateFullSnapshot();
+        runPublish();
+
+        assertTrue(harness.publishLease.acquire(SNAPSHOT_DATE),
+                "the lease must be released in the finally block, even on the happy path");
+        harness.publishLease.release(SNAPSHOT_DATE);
+    }
+
+    @Test
+    public void aStaleLeaseFromADeadRunIsTakenOverRatherThanWedgingPublish() throws Exception {
+        // A worker that dies mid-publish leaves its lease behind. If that blocked forever, one crash would stop
+        // delivery until someone noticed — so the lease is time-bounded and the next run takes it over.
+        accumulateFullSnapshot();
+        assertTrue(harness.publishLease.acquire(SNAPSHOT_DATE));
+        // Age the abandoned lease past its TTL without sleeping through it.
+        harness.s3.backdate(BUCKET, "biaffect-3/_publish/" + SNAPSHOT_DATE + ".running", TimeUnit.HOURS.toMillis(7));
+
+        runPublish();
+
+        assertFalse(uploadedKeys.isEmpty(), "a stale lease must not block the run");
+        assertTrue(harness.s3.exists(BUCKET, "biaffect-3/_publish/" + SNAPSHOT_DATE + ".done"));
+    }
+
+    /** Only the raw-archive keys handed to the transport this run. */
+    private List<String> rawKeysUploaded() {
+        List<String> raw = new ArrayList<>();
+        for (String key : uploadedKeys) {
+            if (key.startsWith("biaffect-3/raw/")) {
+                raw.add(key);
+            }
+        }
+        return raw;
+    }
+
     // -----------------------------------------------------------------------------------------------------------
     // Fixture: a snapshot that populates all 10 tables
+
     // -----------------------------------------------------------------------------------------------------------
 
     private void accumulateFullSnapshot() throws Exception {

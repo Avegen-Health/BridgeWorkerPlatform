@@ -13,7 +13,9 @@ import org.springframework.stereotype.Component;
 
 import org.sagebionetworks.bridge.addf.azure.BlobTransport;
 import org.sagebionetworks.bridge.addf.publish.ManifestGate;
+import org.sagebionetworks.bridge.addf.publish.PublishLease;
 import org.sagebionetworks.bridge.addf.publish.PublishMarker;
+import org.sagebionetworks.bridge.addf.publish.RawArchiveDelivery;
 import org.sagebionetworks.bridge.addf.publish.SnapshotDelta;
 import org.sagebionetworks.bridge.addf.publish.SnapshotDeltaBuilder;
 import org.sagebionetworks.bridge.addf.transform.AddfDateUtils;
@@ -48,12 +50,24 @@ public class AddfPublishWorkerProcessor implements ThrowingConsumer<JsonNode> {
     private SnapshotDeltaBuilder snapshotDeltaBuilder;
     private ManifestGate manifestGate;
     private BlobTransport blobTransport;
+    private RawArchiveDelivery rawArchiveDelivery;
     private PublishMarker publishMarker;
+    private PublishLease publishLease;
     private FileHelper fileHelper;
 
     @Autowired
     public final void setBridgeConfig(Config config) {
         this.config = config;
+    }
+
+    @Autowired
+    public final void setRawArchiveDelivery(RawArchiveDelivery rawArchiveDelivery) {
+        this.rawArchiveDelivery = rawArchiveDelivery;
+    }
+
+    @Autowired
+    public final void setPublishLease(PublishLease publishLease) {
+        this.publishLease = publishLease;
     }
 
     @Autowired
@@ -132,6 +146,13 @@ public class AddfPublishWorkerProcessor implements ThrowingConsumer<JsonNode> {
             return;
         }
 
+        // The .done marker says "this day finished", never "this day is running", so it cannot stop a second trigger
+        // from starting a concurrent run — and two runs read-modify-writing the same consolidated tables silently
+        // lose rows. Take an in-run lease before touching anything (§4.5).
+        if (!publishLease.acquire(snapshotDate)) {
+            return;
+        }
+
         File tempDir = fileHelper.createTempDir();
         try {
             SnapshotDelta delta = snapshotDeltaBuilder.build(snapshotDate, tempDir);
@@ -143,11 +164,18 @@ public class AddfPublishWorkerProcessor implements ThrowingConsumer<JsonNode> {
             // staging objects and tombstones survive (build() only wrote the idempotent consolidated files), so the day
             // replays and rebuilds the identical delta instead of silently dropping it from the Azure mirror (§4.5).
             blobTransport.upload(delta.getBlobs());
+            // Raw archives stream one at a time, and must run while the staging that produced the candidate list is
+            // still in place. Per-archive failures are parked for retry in here rather than thrown, so an unshippable
+            // archive degrades one record instead of blocking the table commit below.
+            RawArchiveDelivery.Result rawResult = rawArchiveDelivery.deliver(delta.getRawCandidates(), tempDir);
             // Upload confirmed: now retire consumed staging + clear tombstone markers, then write the done-marker.
             snapshotDeltaBuilder.commit(delta);
             publishMarker.mark(snapshotDate);
-            LOG.info("ADDF publish succeeded snapshotDate=" + snapshotDate + " blobs=" + delta.getBlobs().size());
+            LOG.info("ADDF publish succeeded snapshotDate=" + snapshotDate + " blobs=" + delta.getBlobs().size()
+                    + " rawDelivered=" + rawResult.getDelivered() + " rawParked=" + rawResult.getParked()
+                    + " rawDeferred=" + rawResult.getDeferred());
         } finally {
+            publishLease.release(snapshotDate);
             try {
                 fileHelper.deleteDirRecursively(tempDir);
             } catch (IOException ex) {

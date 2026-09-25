@@ -10,6 +10,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Date;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -44,6 +45,13 @@ public class InMemoryS3Client extends AbstractAmazonS3 {
     /** bucket -> (key -> bytes), key-ordered so listings come back the way S3 returns them. */
     private final Map<String, TreeMap<String, byte[]>> buckets = new TreeMap<>();
 
+    /**
+     * bucket -> (key -> last-modified). S3 stamps every object and returns it on LIST, and {@code PublishLease} reads
+     * exactly that to decide whether a held lease has gone stale — a listing without it silently makes every lease
+     * look absent, so the fake has to carry it.
+     */
+    private final Map<String, TreeMap<String, Date>> lastModified = new TreeMap<>();
+
     /** Number of {@code putObject} calls, so tests can assert a file was written once rather than repeatedly. */
     private int putCount;
 
@@ -64,6 +72,7 @@ public class InMemoryS3Client extends AbstractAmazonS3 {
             }
         }
         bucket(request.getBucketName()).put(request.getKey(), body);
+        timestamps(request.getBucketName()).put(request.getKey(), new Date());
         putCount++;
         return new PutObjectResult();
     }
@@ -112,6 +121,7 @@ public class InMemoryS3Client extends AbstractAmazonS3 {
                 summary.setBucketName(request.getBucketName());
                 summary.setKey(entry.getKey());
                 summary.setSize(entry.getValue().length);
+                summary.setLastModified(timestamps(request.getBucketName()).get(entry.getKey()));
                 result.getObjectSummaries().add(summary);
             }
         }
@@ -124,6 +134,7 @@ public class InMemoryS3Client extends AbstractAmazonS3 {
     @Override
     public void deleteObject(String bucketName, String key) {
         bucket(bucketName).remove(key);
+        timestamps(bucketName).remove(key);
     }
 
     // -----------------------------------------------------------------------------------------------------------
@@ -164,6 +175,15 @@ public class InMemoryS3Client extends AbstractAmazonS3 {
 
     private TreeMap<String, byte[]> bucket(String name) {
         return buckets.computeIfAbsent(name, n -> new TreeMap<>());
+    }
+
+    private TreeMap<String, Date> timestamps(String name) {
+        return lastModified.computeIfAbsent(name, n -> new TreeMap<>());
+    }
+
+    /** Back-date an object's last-modified stamp, so a test can age a lease past its TTL without sleeping. */
+    public void backdate(String bucketName, String key, long millisAgo) {
+        timestamps(bucketName).put(key, new Date(System.currentTimeMillis() - millisAgo));
     }
 
     private static byte[] drain(InputStream in) throws IOException {

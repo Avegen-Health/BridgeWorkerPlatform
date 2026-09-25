@@ -27,7 +27,9 @@ import org.sagebionetworks.bridge.addf.decrypt.UploadFetcher;
 import org.sagebionetworks.bridge.addf.gate.ConsentTestGate;
 import org.sagebionetworks.bridge.addf.publish.ManifestGate;
 import org.sagebionetworks.bridge.addf.publish.ParquetTableReader;
+import org.sagebionetworks.bridge.addf.publish.PublishLease;
 import org.sagebionetworks.bridge.addf.publish.PublishMarker;
+import org.sagebionetworks.bridge.addf.publish.RawArchiveDelivery;
 import org.sagebionetworks.bridge.addf.publish.SnapshotDeltaBuilder;
 import org.sagebionetworks.bridge.addf.store.ExportStoreClient;
 import org.sagebionetworks.bridge.addf.store.LedgerStore;
@@ -90,6 +92,8 @@ class AddfPipelineHarness {
     final SnapshotDeltaBuilder snapshotDeltaBuilder = new SnapshotDeltaBuilder();
     final ManifestGate manifestGate = new ManifestGate();
     final PublishMarker publishMarker = new PublishMarker();
+    final PublishLease publishLease = new PublishLease();
+    final RawArchiveDelivery rawArchiveDelivery = new RawArchiveDelivery();
 
     final AddfExportWorkerProcessor exportWorker = new AddfExportWorkerProcessor();
     final AddfParticipantVersionWorkerProcessor versionWorker = new AddfParticipantVersionWorkerProcessor();
@@ -110,6 +114,8 @@ class AddfPipelineHarness {
         when(config.get("addf.export.enabled")).thenReturn("true");
         when(config.get("addf.publish.enabled")).thenReturn("true");
         when(config.get("addf.publish.gate.enforced")).thenReturn("true");
+        when(config.get("addf.publish.raw.enabled")).thenReturn("true");
+        when(config.get("addf.publish.raw.max.per.run")).thenReturn("500");
 
         zipHelper.setFileHelper(fileHelper);
 
@@ -168,6 +174,9 @@ class AddfPipelineHarness {
 
         publishMarker.setBridgeConfig(config);
         publishMarker.setAddfS3Client(s3);
+
+        publishLease.setBridgeConfig(config);
+        publishLease.setAddfS3Client(s3);
 
         when(mockBridgeHelper.getApp(APP_ID)).thenReturn(new App().identifier(APP_ID));
 
@@ -251,6 +260,18 @@ class AddfPipelineHarness {
     // -----------------------------------------------------------------------------------------------------------
     // Driving the workers
     // -----------------------------------------------------------------------------------------------------------
+
+    /**
+     * Finish wiring the raw-archive delivery step. Split out because the Azure transport is the one true boundary the
+     * test owns — everything else here is the real collaborator.
+     */
+    void wireRawDelivery(org.sagebionetworks.bridge.addf.azure.BlobTransport blobTransport) {
+        rawArchiveDelivery.setBridgeConfig(config);
+        rawArchiveDelivery.setExportStoreClient(exportStoreClient);
+        rawArchiveDelivery.setLedgerStore(ledgerStore);
+        rawArchiveDelivery.setBlobTransport(blobTransport);
+        rawArchiveDelivery.setFileHelper(fileHelper);
+    }
 
     /**
      * Drive the worker through its real SQS entry point rather than the package-scoped {@code process}, so the JSON
