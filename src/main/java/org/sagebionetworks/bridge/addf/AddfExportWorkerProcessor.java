@@ -183,7 +183,10 @@ public class AddfExportWorkerProcessor implements ThrowingConsumer<JsonNode> {
 
             String item = recordFlattener.resolveItem(archive);
             String uploadedOnUtc = AddfDateUtils.toUtcIso(record.getCreatedOn());
-            ClientInfo clientInfo = ClientInfo.parse(record.getClientInfo());
+            // Both fields, not one: clientInfo is a JSON object and userAgent is a user-agent string. Passing only
+            // clientInfo through the user-agent parser matched nothing, which silently nulled app_version/platform on
+            // every activity row and app_version/device_name/os_name/os_version on every file_records row.
+            ClientInfo clientInfo = ClientInfo.fromRecord(record.getClientInfo(), record.getUserAgent());
             FlattenContext ctx = new FlattenContext(archive, clientInfo, participantVersion, verdict.isTest(),
                     uploadedOnUtc);
 
