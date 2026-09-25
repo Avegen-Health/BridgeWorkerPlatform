@@ -77,6 +77,10 @@ public class SnapshotDeltaBuilderTest {
         when(mockReader.read(anyString(), any(File.class)))
                 .thenAnswer(inv -> rowsByFileName.getOrDefault(inv.getArgumentAt(1, File.class).getName(),
                         ImmutableList.<TableRow>of()));
+        // Default: any consolidated file in the store was written under the current column list, so the
+        // schema-drift rewrite in buildParticipantVersions() does not fire.
+        when(mockReader.readColumnNames(any(File.class)))
+                .thenReturn(AddfTables.columnNames(AddfTables.PARTICIPANT_VERSIONS));
         when(mockWriter.writeAll(anyString(), anyList(), any(File.class)))
                 .thenAnswer(inv -> inv.getArgumentAt(2, File.class));
 

@@ -188,6 +188,16 @@ public class SnapshotDeltaBuilder {
         if (exportStoreClient.consolidatedExists(table)) {
             File existing = exportStoreClient.download(exportStoreClient.consolidatedKey(table),
                     fileHelper.newFile(tempDir, table + "-existing.parquet"));
+            // A file written under an older column list must be rewritten even if nothing else changed this snapshot,
+            // or a column we have stopped delivering survives in the published file indefinitely — for
+            // AddfTables.PII_WITHHELD_PARTICIPANT_FIELDS that means leaked external IDs sitting in ADDI's container
+            // until the next participant version happens to arrive. The reader projects onto the current column list,
+            // so the rewrite drops the retired column for free; participants_current regenerates from these rows.
+            if (!AddfTables.columnNames(table).equals(parquetTableReader.readColumnNames(existing))) {
+                LOG.info("ADDF publish: {} was written under a different column list — rewriting it to {}", table,
+                        AddfTables.columnNames(table));
+                mutated = true;
+            }
             for (TableRow row : parquetTableReader.read(table, existing)) {
                 if (tombstoned.contains(str(row.get("health_code")))) {
                     mutated = true; // drop withdrawn participant's versions
