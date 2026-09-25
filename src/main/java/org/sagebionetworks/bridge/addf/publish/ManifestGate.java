@@ -288,13 +288,23 @@ public class ManifestGate {
 
     /** Recover the table name from a delivery key: {@code current/tables/<table>.parquet} or a keyboard month-part. */
     static String tableOf(String key) {
+        // Keyboard FIRST. Its month parts now live under current/tables/ alongside the single-file tables, so the
+        // consolidated branch below would match them too and derive a table name of
+        // "keyboard_sessions/month=2026-08/part-2026-09-24" — which is no table at all, so the gate would reject its
+        // own delta as "an object outside the ADDF delivery contract" and block every publish carrying keyboard data.
+        if (key.contains(KEYBOARD_PART_MARKER)) {
+            return AddfTables.KEYBOARD_SESSIONS;
+        }
         int idx = key.indexOf(CONSOLIDATED_MARKER);
         if (idx >= 0) {
             String name = key.substring(idx + CONSOLIDATED_MARKER.length());
+            if (name.indexOf('/') >= 0) {
+                // Nested under current/tables/ but not a keyboard part: a partitioned dataset this gate does not know
+                // about. Returning the raw path would fail confusingly later; null routes it to the explicit
+                // "outside the delivery contract" failure, which names the key.
+                return null;
+            }
             return name.endsWith(PARQUET_SUFFIX) ? name.substring(0, name.length() - PARQUET_SUFFIX.length()) : name;
-        }
-        if (key.contains(KEYBOARD_PART_MARKER)) {
-            return AddfTables.KEYBOARD_SESSIONS;
         }
         return null;
     }

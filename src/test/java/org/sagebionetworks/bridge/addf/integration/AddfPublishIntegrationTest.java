@@ -553,7 +553,7 @@ public class AddfPublishIntegrationTest {
     private List<TableRow> delivered(String table) throws Exception {
         List<TableRow> rows = new ArrayList<>();
         if (AddfTables.KEYBOARD_SESSIONS.equals(table)) {
-            for (String key : harness.s3.keysUnder(BUCKET, "biaffect-3/keyboard_sessions/")) {
+            for (String key : harness.s3.keysUnder(BUCKET, CURRENT_TABLES + AddfTables.KEYBOARD_SESSIONS + "/")) {
                 rows.addAll(readKey(table, key));
             }
             return rows;

@@ -349,6 +349,26 @@ public class ManifestGateTest {
         org.testng.Assert.assertEquals(ManifestGate.tableOf("biaffect-3/raw/2026-09-22/rec-1-PHQ-9.zip"), null);
     }
 
+    @Test
+    public void aKeyboardPartIsRecognisedEvenThoughItSitsUnderCurrentTables() {
+        // Regression. keyboard_sessions moved under current/tables/ to sit alongside the other nine tables, which put
+        // its month parts inside the prefix the single-file branch matches on. Resolved in the wrong order, a part
+        // key yields the "table" keyboard_sessions/month=2026-09/part-<date> — no such table, so the gate rejected
+        // its own delta as an object outside the delivery contract and blocked every publish carrying keyboard data.
+        String part = "biaffect-3/current/tables/keyboard_sessions/month=2026-09/part-2026-09-24.parquet";
+        org.testng.Assert.assertEquals(ManifestGate.tableOf(part), AddfTables.KEYBOARD_SESSIONS);
+        org.testng.Assert.assertNotNull(AddfTables.columnsFor(ManifestGate.tableOf(part)),
+                "whatever tableOf returns must be a real table, or indexByTable rejects the delta");
+    }
+
+    @Test
+    public void anUnknownPartitionedDatasetUnderCurrentTablesIsRejectedNotGuessedAt() {
+        // A future partitioned table the gate has not been taught about must fail by name rather than be silently
+        // admitted under a path-shaped "table" that no schema matches.
+        org.testng.Assert.assertNull(
+                ManifestGate.tableOf("biaffect-3/current/tables/some_future_table/part=1/data.parquet"));
+    }
+
     private static TableRow versionRow(String healthCode, Long version) {
         return new TableRow(AddfTables.PARTICIPANT_VERSIONS, healthCode)
                 .put("health_code", healthCode)
