@@ -76,6 +76,14 @@ class AddfPipelineHarness {
     static final String BUCKET = "org-gvbridge-addf-exportstore-test";
     static final String UPLOAD_BUCKET = "org-sagebridge-upload-test";
 
+    /**
+     * The canonical JSON form of a record's client metadata. Note {@code osName} is Apple's identifier
+     * ({@code iPhone OS}) where the user-agent form says {@code iOS} — the two genuinely disagree, which is why the
+     * JSON is preferred rather than used as a fallback.
+     */
+    static final String CLIENT_INFO_JSON = "{\"appName\":\"biaffect-3\",\"appVersion\":68,"
+            + "\"deviceName\":\"iPhone 11 Pro\",\"osName\":\"iPhone OS\",\"osVersion\":\"26.5.2\"}";
+
     final InMemoryS3Client s3 = new InMemoryS3Client();
     final FileHelper fileHelper = new FileHelper();
     final BridgeHelper mockBridgeHelper = mock(BridgeHelper.class);
@@ -205,7 +213,11 @@ class AddfPipelineHarness {
         when(record.getHealthCode()).thenReturn(healthCode);
         when(record.getParticipantVersion()).thenReturn(participantVersion);
         when(record.getCreatedOn()).thenReturn(createdOn);
-        when(record.getClientInfo()).thenReturn(clientInfo);
+        // Both wire forms, as a real record carries them: clientInfo is a JSON object (the canonical source) and
+        // userAgent is the user-agent string (the fallback). Setting only one would quietly reproduce the very
+        // defect f4894eb fixed — seven columns silently null — and the integration test would not notice.
+        when(record.getClientInfo()).thenReturn(CLIENT_INFO_JSON);
+        when(record.getUserAgent()).thenReturn(clientInfo);
         when(mockBridgeHelper.getHealthDataRecordForExporter3(APP_ID, recordId)).thenReturn(record);
 
         Upload upload = mock(Upload.class);

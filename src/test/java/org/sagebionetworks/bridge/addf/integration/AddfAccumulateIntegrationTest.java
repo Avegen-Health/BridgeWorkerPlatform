@@ -85,6 +85,18 @@ public class AddfAccumulateIntegrationTest {
         assertEquals(manifest.get("item"), "PHQ-9");
         assertEquals(manifest.get("file_name"), "raw/2026-08-15/rec-1-PHQ-9.zip");
 
+        // The device/OS columns must actually be populated. These were the seven columns that shipped null for
+        // months because the JSON clientInfo was fed through the user-agent parser and matched nothing; asserting
+        // them here means the regression cannot come back silently through the accumulate path.
+        assertEquals(manifest.get("app_version"), "68");
+        assertEquals(manifest.get("device_name"), "iPhone 11 Pro");
+        assertEquals(manifest.get("os_version"), "26.5.2");
+        // The JSON and the user agent genuinely disagree on os_name — Apple's identifier vs the marketing name — and
+        // the JSON is the canonical source, so "iPhone OS" here is the proof that precedence is the right way round.
+        assertEquals(manifest.get("os_name"), "iPhone OS");
+        // ...while platform is normalised across both forms, so it stays a single stable token.
+        assertEquals(phq9.get("platform"), "ios");
+
         // Ledger marked only after every write succeeded.
         assertTrue(harness.s3.exists(BUCKET, LEDGER + "record/rec-1"));
     }

@@ -186,13 +186,18 @@ public class ExportStoreClient {
     }
 
     /**
-     * List every keyboard month-part already in the delivery tree, under
-     * {@code biaffect-3/keyboard_sessions/month=.../}. {@code keyboard_sessions} is the one table with no consolidated
-     * single file, so {@link #consolidatedExists} can never answer "is this table present?" for it — the manifest gate
-     * (§7) uses this instead.
+     * List every keyboard month-part already in the delivery tree. {@code keyboard_sessions} is the one table with no
+     * consolidated single file, so {@link #consolidatedExists} can never answer "is this table present?" for it — the
+     * manifest gate (§7) uses this instead.
+     *
+     * <p>The prefix is <b>derived from {@link #keyboardPartKey}</b> rather than spelled out again. Restating it would
+     * make the two silently disagree the next time the keyboard dataset moves — and it has moved once already, from
+     * the delivery root to {@code current/tables/}. A stale prefix here does not fail loudly: it returns an empty
+     * list, which the gate reads as "keyboard_sessions is absent" and blocks every publish.</p>
      */
     public List<String> listKeyboardParts() {
-        return listKeys(ROOT_PREFIX + AddfTables.KEYBOARD_SESSIONS + "/");
+        String probe = keyboardPartKey("", "");
+        return listKeys(probe.substring(0, probe.indexOf("month=")));
     }
 
     /** List tombstoned health codes (the basename under {@code _tombstone/}) — participants withdrawn since last publish (§3b.3). */
