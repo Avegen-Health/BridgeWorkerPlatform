@@ -15,7 +15,58 @@ before_deploy:
   - cp target/BridgeWorkerPlatform-1.0.war /tmp/eb-bundle/ROOT.war
   - cp .platform/hooks/postdeploy/99_cloudwatch_tomcat.sh /tmp/eb-bundle/.platform/hooks/postdeploy/
   - chmod +x /tmp/eb-bundle/.platform/hooks/postdeploy/99_cloudwatch_tomcat.sh
+  # .ebextensions must sit at the SOURCE BUNDLE root. maven-war-plugin also copies
+  # ebextensions/ to .ebextensions inside the WAR (see pom.xml webResources), which EB
+  # honours only when the bundle IS a single bare WAR. Since the switch to a multi-file
+  # source bundle (46b280e) EB stopped reading them, silently disabling logrotate,
+  # newrelic, tomcat-log-cleanup, tomcatlogs and eip-associate. Verified on the uat
+  # instance: /var/app/current/.ebextensions did not exist and no config command ever ran.
+  # Copied from source (not extracted from the WAR) because the only ${...} in these files
+  # is a shell variable, so the unfiltered originals are the faithful ones.
+  #
+  # SHIPPED SELECTIVELY, ON PURPOSE. These five have not executed since 46b280e, and in EB
+  # a non-zero exit from any commands/container_commands entry FAILS THE DEPLOY. Turning all
+  # five back on in one step puts two untested failure paths on the deploy that carries the
+  # ADDF egress fix. bridgeworker-uat is SingleInstance on a retired-Launch-Configuration
+  # platform, where a Degraded environment is genuinely expensive to recover, so the two
+  # risky configs are deferred to their own change rather than ridden in on this one:
+  #
+  #   tomcatlogs.config  - '02c service awslogsd restart' and '03 systemctl restart rsyslog'
+  #     carry no ignoreErrors (unlike 02a/02b, which do - the asymmetry looks accidental), and
+  #     awslogsd is already crash-looping on this instance; restarting a unit in a start-limit
+  #     state exits non-zero. It also aims LEGACY awslogs at /var/log/tomcat/catalina.out, the
+  #     same file .platform/hooks/postdeploy/99_cloudwatch_tomcat.sh already streams via the
+  #     CloudWatch Agent - two writers on one log stream contend on sequence tokens, which is
+  #     the likeliest cause of that crash-loop. That log group backs the ADDF publish-heartbeat
+  #     metric filter, so this is not a harmless duplicate.
+  #   newrelic.config    - '14 yum makecache' / '20 yum install' carry no ignoreErrors and run
+  #     against the el/6 (RHEL 6) repo on Amazon Linux 2 with gpgcheck+repo_gpgcheck on; a key
+  #     fetch or dependency resolution failure fails the deploy. '13' also uses curl WITHOUT -f,
+  #     so the day that URL 404s it writes the error page into /etc/yum.repos.d/ and exits 0.
+  #
+  # The three below are safe: two write a file and run nothing, and eip-associate no-ops when
+  # ADDF_EGRESS_EIP_ALLOCATION_ID is unset. eip-associate is the one that matters now - it pins
+  # the worker's outbound IP to the EIP allowlisted on the Azure staging storage firewall, on
+  # every deploy AND on instance replacement. Its preconditions are wired: ec2:AssociateAddress
+  # + ec2:DescribeAddresses via AWSIAMEipAssociateManagedPolicy, and the allocation id via the
+  # ADDF_EGRESS_EIP_ALLOCATION_ID env property (both in BridgeWorkerPlatform-infra).
+  - mkdir -p /tmp/eb-bundle/.ebextensions
+  - cp ebextensions/eip-associate.config /tmp/eb-bundle/.ebextensions/
+  - cp ebextensions/logrotate.config /tmp/eb-bundle/.ebextensions/
+  - cp ebextensions/tomcat-log-cleanup.config /tmp/eb-bundle/.ebextensions/
   - cd /tmp/eb-bundle && zip -r "$TRAVIS_BUILD_DIR/eb-bundle.zip" . && cd -
+  # Fail loudly if the bundle is ever assembled wrong again. Both previous breakages
+  # (missing ROOT.war, missing .ebextensions) deployed green and failed only at runtime.
+  # Paths are grepped with -F and a leading space so the '.' stays a literal and the match
+  # is against the unzip listing's path column, not an arbitrary substring.
+  - 'unzip -l "$TRAVIS_BUILD_DIR/eb-bundle.zip" | grep -qF " ROOT.war" || { echo "BUNDLE ERROR - ROOT.war missing"; exit 1; }'
+  - 'unzip -l "$TRAVIS_BUILD_DIR/eb-bundle.zip" | grep -qF " .ebextensions/eip-associate.config" || { echo "BUNDLE ERROR - eip-associate.config missing (ADDF Azure egress EIP would not be associated)"; exit 1; }'
+  - 'unzip -l "$TRAVIS_BUILD_DIR/eb-bundle.zip" | grep -qF " .platform/hooks/postdeploy/99_cloudwatch_tomcat.sh" || { echo "BUNDLE ERROR - .platform postdeploy hook missing"; exit 1; }'
+  # Guard the deferral above: a future blanket "cp -r ebextensions" would silently re-arm the
+  # two configs that can fail a deploy. Re-adding them should be a deliberate change that also
+  # fixes their missing ignoreErrors, not a side effect of tidying this block.
+  - 'unzip -l "$TRAVIS_BUILD_DIR/eb-bundle.zip" | grep -qF " .ebextensions/tomcatlogs.config" && { echo "BUNDLE ERROR - tomcatlogs.config is deferred (awslogs restart has no ignoreErrors; duplicates the CloudWatch Agent stream)"; exit 1; }; true'
+  - 'unzip -l "$TRAVIS_BUILD_DIR/eb-bundle.zip" | grep -qF " .ebextensions/newrelic.config" && { echo "BUNDLE ERROR - newrelic.config is deferred (yum makecache/install have no ignoreErrors)"; exit 1; }; true'
 branches:
   only:
   - develop
