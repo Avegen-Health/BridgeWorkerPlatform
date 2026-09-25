@@ -18,6 +18,8 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import org.sagebionetworks.bridge.addf.azure.BlobTransport;
+import org.sagebionetworks.bridge.addf.publish.ManifestGate;
+import org.sagebionetworks.bridge.addf.publish.ManifestGateException;
 import org.sagebionetworks.bridge.addf.publish.PublishLease;
 import org.sagebionetworks.bridge.addf.publish.PublishMarker;
 import org.sagebionetworks.bridge.addf.publish.RawArchiveDelivery;
@@ -36,6 +38,7 @@ public class AddfPublishWorkerProcessorTest {
 
     private Config mockConfig;
     private SnapshotDeltaBuilder mockBuilder;
+    private ManifestGate mockGate;
     private BlobTransport mockTransport;
     private PublishMarker mockMarker;
     private PublishLease mockLease;
@@ -48,6 +51,7 @@ public class AddfPublishWorkerProcessorTest {
     public void before() throws Exception {
         mockConfig = mock(Config.class);
         mockBuilder = mock(SnapshotDeltaBuilder.class);
+        mockGate = mock(ManifestGate.class);
         mockTransport = mock(BlobTransport.class);
         mockMarker = mock(PublishMarker.class);
         mockLease = mock(PublishLease.class);
@@ -67,6 +71,7 @@ public class AddfPublishWorkerProcessorTest {
         processor = new AddfPublishWorkerProcessor();
         processor.setBridgeConfig(mockConfig);
         processor.setSnapshotDeltaBuilder(mockBuilder);
+        processor.setManifestGate(mockGate);
         processor.setBlobTransport(mockTransport);
         processor.setPublishMarker(mockMarker);
         processor.setPublishLease(mockLease);
@@ -84,10 +89,12 @@ public class AddfPublishWorkerProcessorTest {
 
         processor.accept(body("{\"snapshotDate\":\"" + SNAPSHOT_DATE + "\"}"));
 
-        // Crash-safety ordering: build -> upload -> commit (retire staging/tombstones) -> mark. commit MUST follow the
-        // upload so an upload failure leaves staging intact for an idempotent replay.
-        InOrder inOrder = Mockito.inOrder(mockBuilder, mockTransport, mockMarker);
+        // Crash-safety ordering: build -> gate -> upload -> commit (retire staging/tombstones) -> mark. The gate sits
+        // before the upload so a bad snapshot never reaches ADDI; commit MUST follow the upload so an upload failure
+        // leaves staging intact for an idempotent replay.
+        InOrder inOrder = Mockito.inOrder(mockBuilder, mockGate, mockTransport, mockMarker);
         inOrder.verify(mockBuilder).build(eq(SNAPSHOT_DATE), eq(tempDir));
+        inOrder.verify(mockGate).assertDeliverable(eq(SNAPSHOT_DATE), any(SnapshotDelta.class), eq(tempDir));
         inOrder.verify(mockTransport).upload(any());
         inOrder.verify(mockBuilder).commit(any(SnapshotDelta.class));
         inOrder.verify(mockMarker).mark(SNAPSHOT_DATE);
@@ -110,6 +117,27 @@ public class AddfPublishWorkerProcessorTest {
         verify(mockBuilder, never()).commit(any(SnapshotDelta.class));
         verify(mockMarker, never()).mark(anyString());
         // Temp dir still cleaned even on the failure path.
+        verify(mockFileHelper).deleteDirRecursively(tempDir);
+    }
+
+    @Test
+    public void manifestGateFailureBlocksUploadCommitAndMark() throws Exception {
+        when(mockConfig.get("addf.publish.enabled")).thenReturn("true");
+        Mockito.doThrow(new ManifestGateException("2 of 10 table(s) absent")).when(mockGate)
+                .assertDeliverable(anyString(), any(SnapshotDelta.class), any(File.class));
+
+        try {
+            processor.accept(body("{\"snapshotDate\":\"" + SNAPSHOT_DATE + "\"}"));
+            org.testng.Assert.fail("expected the manifest gate to block the snapshot");
+        } catch (ManifestGateException expected) {
+            // ManifestGateException extends WorkerException, so accept()'s multi-catch rethrows it unwrapped: the SQS
+            // message fails, the DLQ + heartbeat alarms fire, and the day replays once the defect is fixed.
+        }
+
+        // Nothing may reach ADDI, staging must survive, and the day must not be claimed as done.
+        verify(mockTransport, never()).upload(any());
+        verify(mockBuilder, never()).commit(any(SnapshotDelta.class));
+        verify(mockMarker, never()).mark(anyString());
         verify(mockFileHelper).deleteDirRecursively(tempDir);
     }
 

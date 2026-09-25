@@ -9,7 +9,11 @@ import org.apache.avro.generic.GenericRecord;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.parquet.avro.AvroParquetReader;
+import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.ParquetReader;
+import org.apache.parquet.hadoop.util.HadoopInputFile;
+import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.Type;
 import org.springframework.stereotype.Component;
 
 import org.sagebionetworks.bridge.addf.transform.AddfTables;
@@ -60,6 +64,25 @@ public class ParquetTableReader {
             }
         }
         return rows;
+    }
+
+    /**
+     * Read only the column names a Parquet file actually declares, in file order, from its footer — no row scan. The
+     * manifest gate (§7) uses this to assert a file we are about to deliver carries exactly the columns
+     * {@link AddfTables} declares; {@link #read} cannot detect that drift because it reads <em>by</em> the AddfTables
+     * column list rather than by the file's own schema.
+     */
+    public List<String> readColumnNames(File file) throws IOException {
+        Path path = new Path(file.getAbsolutePath());
+        Configuration conf = newConf();
+        try (ParquetFileReader reader = ParquetFileReader.open(HadoopInputFile.fromPath(path, conf))) {
+            MessageType schema = reader.getFooter().getFileMetaData().getSchema();
+            List<String> names = new ArrayList<>();
+            for (Type field : schema.getFields()) {
+                names.add(field.getName());
+            }
+            return names;
+        }
     }
 
     /** Avro returns {@code Utf8} for string fields; normalise to {@link String} so downstream comparisons are plain. */

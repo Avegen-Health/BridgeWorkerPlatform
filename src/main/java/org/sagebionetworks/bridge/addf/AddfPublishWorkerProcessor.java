@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import org.sagebionetworks.bridge.addf.azure.BlobTransport;
+import org.sagebionetworks.bridge.addf.publish.ManifestGate;
 import org.sagebionetworks.bridge.addf.publish.PublishLease;
 import org.sagebionetworks.bridge.addf.publish.PublishMarker;
 import org.sagebionetworks.bridge.addf.publish.RawArchiveDelivery;
@@ -47,6 +48,7 @@ public class AddfPublishWorkerProcessor implements ThrowingConsumer<JsonNode> {
 
     private Config config;
     private SnapshotDeltaBuilder snapshotDeltaBuilder;
+    private ManifestGate manifestGate;
     private BlobTransport blobTransport;
     private RawArchiveDelivery rawArchiveDelivery;
     private PublishMarker publishMarker;
@@ -71,6 +73,11 @@ public class AddfPublishWorkerProcessor implements ThrowingConsumer<JsonNode> {
     @Autowired
     public final void setSnapshotDeltaBuilder(SnapshotDeltaBuilder snapshotDeltaBuilder) {
         this.snapshotDeltaBuilder = snapshotDeltaBuilder;
+    }
+
+    @Autowired
+    public final void setManifestGate(ManifestGate manifestGate) {
+        this.manifestGate = manifestGate;
     }
 
     @Autowired
@@ -149,6 +156,10 @@ public class AddfPublishWorkerProcessor implements ThrowingConsumer<JsonNode> {
         File tempDir = fileHelper.createTempDir();
         try {
             SnapshotDelta delta = snapshotDeltaBuilder.build(snapshotDate, tempDir);
+            // Correctness gate (§7) BEFORE the upload: all 10 tables present, every delta file matching its column
+            // contract, no orphan participant_version FKs. A miss throws, so nothing reaches ADDI, staging stays intact
+            // and the marker is never written — the day replays once the defect is fixed.
+            manifestGate.assertDeliverable(snapshotDate, delta, tempDir);
             // Upload to Azure staging BEFORE consuming staging or writing the marker: on a crash/upload failure here the
             // staging objects and tombstones survive (build() only wrote the idempotent consolidated files), so the day
             // replays and rebuilds the identical delta instead of silently dropping it from the Azure mirror (§4.5).

@@ -18,6 +18,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import org.sagebionetworks.bridge.addf.transform.AddfDateUtils;
+import org.sagebionetworks.bridge.addf.transform.AddfTables;
 import org.sagebionetworks.bridge.config.Config;
 
 /**
@@ -38,7 +39,8 @@ public class ExportStoreClient {
     static final String STAGING_PREFIX = ROOT_PREFIX + "_staging/";
     static final String TOMBSTONE_PREFIX = ROOT_PREFIX + "_tombstone/";
     static final String PENDING_RAW_PREFIX = ROOT_PREFIX + "_pending_raw/";
-    static final String CURRENT_TABLES_PREFIX = "current/tables/";
+    /** Public because the manifest gate (§7) recovers a table name from a delivery key rather than restating it. */
+    public static final String CURRENT_TABLES_PREFIX = "current/tables/";
     static final String CONFIG_KEY_EXPORTSTORE_BUCKET = "addf.exportstore.bucket";
 
     private AmazonS3 s3Client;
@@ -74,7 +76,7 @@ public class ExportStoreClient {
      * version is immutable, so a repeat key is a harmless overwrite of identical content.
      */
     public void stageVersionRow(String healthCode, int participantVersion, File parquetFile) {
-        String key = ROOT_PREFIX + "_staging/" + org.sagebionetworks.bridge.addf.transform.AddfTables.PARTICIPANT_VERSIONS
+        String key = ROOT_PREFIX + "_staging/" + AddfTables.PARTICIPANT_VERSIONS
                 + "/" + AddfDateUtils.todayUtcDate() + "/" + healthCode + "_" + participantVersion + ".parquet";
         putFile(key, parquetFile);
         LOG.info("ADDF staged participant_version: healthCode={} version={} key={}", healthCode, participantVersion,
@@ -120,9 +122,19 @@ public class ExportStoreClient {
         return ROOT_PREFIX + CURRENT_TABLES_PREFIX + table + ".parquet";
     }
 
-    /** The keyboard part-file key for a month + publish label: {@code biaffect-3/keyboard_sessions/month=YYYY-MM/part-<snapshotDate>.parquet} (§4.3.2). */
+    /**
+     * The keyboard part-file key for a month + publish label:
+     * {@code biaffect-3/current/tables/keyboard_sessions/month=YYYY-MM/part-<snapshotDate>.parquet} (§4.3.2).
+     *
+     * <p>Sits under {@code current/tables/} like every other table. {@code keyboard_sessions} is a month-partitioned
+     * <i>dataset</i> rather than a single file, but it is still one of the ten delivered tables and readers treat the
+     * folder as one table. It previously hung off the delivery root, one level up, so a consumer pointed at
+     * {@code current/tables/} — the stable path the delivery format tells researchers to use — silently saw nine
+     * tables and missed the highest-volume one. The Azure blob name is this key, so the gap reached the partner.</p>
+     */
     public String keyboardPartKey(String month, String snapshotDate) {
-        return ROOT_PREFIX + "keyboard_sessions/month=" + month + "/part-" + snapshotDate + ".parquet";
+        return ROOT_PREFIX + CURRENT_TABLES_PREFIX + AddfTables.KEYBOARD_SESSIONS + "/month=" + month + "/part-"
+                + snapshotDate + ".parquet";
     }
 
     /**
@@ -181,6 +193,21 @@ public class ExportStoreClient {
     /** List the staged per-record object keys under {@code _staging/<table>/} (all stage-date partitions), paged. */
     public List<String> listStaged(String table) {
         return listKeys(STAGING_PREFIX + table + "/");
+    }
+
+    /**
+     * List every keyboard month-part already in the delivery tree. {@code keyboard_sessions} is the one table with no
+     * consolidated single file, so {@link #consolidatedExists} can never answer "is this table present?" for it — the
+     * manifest gate (§7) uses this instead.
+     *
+     * <p>The prefix is <b>derived from {@link #keyboardPartKey}</b> rather than spelled out again. Restating it would
+     * make the two silently disagree the next time the keyboard dataset moves — and it has moved once already, from
+     * the delivery root to {@code current/tables/}. A stale prefix here does not fail loudly: it returns an empty
+     * list, which the gate reads as "keyboard_sessions is absent" and blocks every publish.</p>
+     */
+    public List<String> listKeyboardParts() {
+        String probe = keyboardPartKey("", "");
+        return listKeys(probe.substring(0, probe.indexOf("month=")));
     }
 
     /** List tombstoned health codes (the basename under {@code _tombstone/}) — participants withdrawn since last publish (§3b.3). */

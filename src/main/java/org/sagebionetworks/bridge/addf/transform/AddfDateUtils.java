@@ -39,7 +39,10 @@ public final class AddfDateUtils {
         if (epochSeconds == null) {
             return null;
         }
-        return UTC_FORMAT.print(new DateTime(Math.round(epochSeconds * 1000d), DateTimeZone.UTC));
+        // Truncate the sub-millisecond remainder rather than rounding it: the delivered data does, and rounding shifts
+        // a timestamp like 1787223907.229764 forward to ...230Z where the golden has ...229Z. One millisecond is
+        // immaterial to the science but a silent off-by-one against the contract is not.
+        return UTC_FORMAT.print(new DateTime((long) (epochSeconds * 1000d), DateTimeZone.UTC));
     }
 
     /** Format a joda {@link DateTime} as ISO-8601 UTC ({@code …Z}). Null-safe. */
@@ -70,6 +73,22 @@ public final class AddfDateUtils {
         }
         try {
             return UTC_FORMAT.print(OFFSET_PARSER.parseDateTime(isoString).withZone(DateTimeZone.UTC));
+        } catch (RuntimeException ex) {
+            return null;
+        }
+    }
+
+    /**
+     * Epoch millis of an ISO timestamp, or null when the input is null/empty/unparseable. Used to order two candidate
+     * timestamps by instant rather than by string — fractional-second digits vary between payloads, so lexicographic
+     * comparison of two ISO strings is not reliably chronological.
+     */
+    public static Long epochMillis(String isoString) {
+        if (isoString == null || isoString.isEmpty()) {
+            return null;
+        }
+        try {
+            return OFFSET_PARSER.parseDateTime(isoString).getMillis();
         } catch (RuntimeException ex) {
             return null;
         }

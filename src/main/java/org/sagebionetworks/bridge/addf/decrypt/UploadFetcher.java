@@ -123,6 +123,16 @@ public class UploadFetcher {
                     recordId + ": " + ex.getMessage(), ex);
         }
 
+        if (unzipped.isEmpty()) {
+            // ZipInputStream does not object to being handed something that isn't a zip — it simply reports no
+            // entries, so a truncated or corrupt archive "unzips" successfully to nothing. Without this check the
+            // record would be flattened to a file_records row with no content row and then marked done in the ledger,
+            // which is unrecoverable: it can never be retried, and nothing downstream distinguishes it from a
+            // genuinely unmapped assessment type. A real Bridge upload archive always carries at least one member.
+            throw new PollSqsWorkerBadRequestException("Empty or unreadable archive for app " + appId + " record " +
+                    recordId);
+        }
+
         Map<String, JsonNode> jsonFiles = new HashMap<>();
         for (Map.Entry<String, File> entry : unzipped.entrySet()) {
             String name = entry.getKey();
