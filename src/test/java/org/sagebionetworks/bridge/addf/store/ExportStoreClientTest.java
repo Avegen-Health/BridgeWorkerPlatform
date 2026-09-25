@@ -23,6 +23,7 @@ import org.mockito.ArgumentCaptor;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import org.sagebionetworks.bridge.addf.transform.AddfTables;
 import org.sagebionetworks.bridge.config.Config;
 
 public class ExportStoreClientTest {
@@ -111,8 +112,47 @@ public class ExportStoreClientTest {
     @Test
     public void consolidatedAndKeyboardKeys() {
         assertEquals(client.consolidatedKey("phq9"), "biaffect-3/current/tables/phq9.parquet");
+        // keyboard_sessions is a partitioned dataset but still one of the ten delivered tables, so its parts live
+        // under current/tables/ alongside the single-file tables — not one level up at the delivery root.
         assertEquals(client.keyboardPartKey("2026-08", "2026-09-22"),
-                "biaffect-3/keyboard_sessions/month=2026-08/part-2026-09-22.parquet");
+                "biaffect-3/current/tables/keyboard_sessions/month=2026-08/part-2026-09-22.parquet");
+    }
+
+    /**
+     * Every delivered table — single-file and partitioned alike — is reachable under the one {@code current/tables/}
+     * prefix, which is the path the delivery format points researchers at. Walks the table list rather than spelling
+     * names out, so a table added later cannot quietly land outside it.
+     */
+    @Test
+    public void everyDeliveredTableSharesTheCurrentTablesPrefix() {
+        String prefix = "biaffect-3/current/tables/";
+        for (String table : AddfTables.allTables()) {
+            String key = AddfTables.KEYBOARD_SESSIONS.equals(table)
+                    ? client.keyboardPartKey("2026-08", "2026-09-22")
+                    : client.consolidatedKey(table);
+            assertTrue(key.startsWith(prefix + table), table + " not under " + prefix + ": " + key);
+        }
+    }
+
+    /**
+     * The manifest gate's only answer to "is keyboard_sessions present?" is this listing, and a prefix that has
+     * drifted from {@link ExportStoreClient#keyboardPartKey} does not fail loudly — it returns empty, the gate reads
+     * that as the table being absent, and every publish is blocked. Pin the two together.
+     */
+    @Test
+    public void listKeyboardPartsUsesTheSamePrefixAsKeyboardPartKey() {
+        ListObjectsV2Result result = new ListObjectsV2Result();
+        String partKey = client.keyboardPartKey("2026-08", "2026-09-22");
+        result.getObjectSummaries().add(summary(partKey));
+        when(mockS3.listObjectsV2(any(ListObjectsV2Request.class))).thenReturn(result);
+
+        assertEquals(client.listKeyboardParts(), ImmutableList.of(partKey));
+
+        ArgumentCaptor<ListObjectsV2Request> captor = ArgumentCaptor.forClass(ListObjectsV2Request.class);
+        verify(mockS3).listObjectsV2(captor.capture());
+        String listedPrefix = captor.getValue().getPrefix();
+        assertTrue(partKey.startsWith(listedPrefix),
+                "listKeyboardParts lists " + listedPrefix + " but parts are written to " + partKey);
     }
 
     @Test

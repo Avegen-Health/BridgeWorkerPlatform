@@ -66,7 +66,7 @@ public class SnapshotDeltaBuilderTest {
         when(mockStore.consolidatedKey(anyString()))
                 .thenAnswer(inv -> "biaffect-3/current/tables/" + inv.getArgumentAt(0, String.class) + ".parquet");
         when(mockStore.keyboardPartKey(anyString(), anyString()))
-                .thenAnswer(inv -> "biaffect-3/keyboard_sessions/month=" + inv.getArgumentAt(0, String.class)
+                .thenAnswer(inv -> "biaffect-3/current/tables/keyboard_sessions/month=" + inv.getArgumentAt(0, String.class)
                         + "/part-" + inv.getArgumentAt(1, String.class) + ".parquet");
 
         // newFile -> a File whose name we control; download returns that same file; reader reads rows by file name.
@@ -378,7 +378,7 @@ public class SnapshotDeltaBuilderTest {
 
         verify(mockWriter).writeAll(eq(AddfTables.KEYBOARD_SESSIONS), anyList(), any(File.class));
         boolean hasKeyboardPart = delta.getBlobs().stream().anyMatch(
-                b -> b.getKey().equals("biaffect-3/keyboard_sessions/month=2026-08/part-2026-09-22.parquet"));
+                b -> b.getKey().equals("biaffect-3/current/tables/keyboard_sessions/month=2026-08/part-2026-09-22.parquet"));
         assertTrue(hasKeyboardPart, "expected a dated keyboard month part in the delta");
         // Consumed keys aggregate across tables (version "v" + keyboard "k") into one commit batch.
         builder.commit(delta);

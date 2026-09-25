@@ -62,7 +62,7 @@ public class SnapshotDeltaBuilderEdgeCasesTest {
         when(mockStore.consolidatedKey(anyString()))
                 .thenAnswer(inv -> "biaffect-3/current/tables/" + inv.getArgumentAt(0, String.class) + ".parquet");
         when(mockStore.keyboardPartKey(anyString(), anyString()))
-                .thenAnswer(inv -> "biaffect-3/keyboard_sessions/month=" + inv.getArgumentAt(0, String.class)
+                .thenAnswer(inv -> "biaffect-3/current/tables/keyboard_sessions/month=" + inv.getArgumentAt(0, String.class)
                         + "/part-" + inv.getArgumentAt(1, String.class) + ".parquet");
         when(mockFileHelper.newFile(any(File.class), anyString()))
                 .thenAnswer(inv -> new File(tempDir, inv.getArgumentAt(1, String.class)));
@@ -191,9 +191,11 @@ public class SnapshotDeltaBuilderEdgeCasesTest {
 
         SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
-        assertTrue(hasBlob(delta, "biaffect-3/keyboard_sessions/month=2026-07/part-" + SNAPSHOT_DATE + ".parquet"),
+        assertTrue(hasBlob(delta, "biaffect-3/current/tables/keyboard_sessions/month=2026-07/part-"
+                + SNAPSHOT_DATE + ".parquet"),
                 blobKeys(delta));
-        assertTrue(hasBlob(delta, "biaffect-3/keyboard_sessions/month=2026-08/part-" + SNAPSHOT_DATE + ".parquet"),
+        assertTrue(hasBlob(delta, "biaffect-3/current/tables/keyboard_sessions/month=2026-08/part-"
+                + SNAPSHOT_DATE + ".parquet"),
                 blobKeys(delta));
     }
 
@@ -208,7 +210,8 @@ public class SnapshotDeltaBuilderEdgeCasesTest {
 
         SnapshotDelta delta = builder.build(SNAPSHOT_DATE, tempDir);
 
-        assertTrue(hasBlob(delta, "biaffect-3/keyboard_sessions/month=2026-09/part-" + SNAPSHOT_DATE + ".parquet"),
+        assertTrue(hasBlob(delta, "biaffect-3/current/tables/keyboard_sessions/month=2026-09/part-"
+                + SNAPSHOT_DATE + ".parquet"),
                 blobKeys(delta));
     }
 

@@ -34,7 +34,7 @@ import org.sagebionetworks.bridge.file.FileHelper;
 public class ManifestGateTest {
     private static final String SNAPSHOT_DATE = "2026-09-22";
     private static final String KEYBOARD_PART_KEY =
-            "biaffect-3/keyboard_sessions/month=2026-09/part-" + SNAPSHOT_DATE + ".parquet";
+            "biaffect-3/current/tables/keyboard_sessions/month=2026-09/part-" + SNAPSHOT_DATE + ".parquet";
 
     private Config mockConfig;
     private ExportStoreClient mockStore;

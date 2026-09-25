@@ -112,7 +112,7 @@ public class AddfPublishIntegrationTest {
         // 1) Every one of the 10 contract tables is present in the delivery tree.
         for (String table : AddfTables.allTables()) {
             if (AddfTables.KEYBOARD_SESSIONS.equals(table)) {
-                assertFalse(harness.s3.keysUnder(BUCKET, "biaffect-3/keyboard_sessions/month=").isEmpty(),
+                assertFalse(harness.s3.keysUnder(BUCKET, "biaffect-3/current/tables/keyboard_sessions/month=").isEmpty(),
                         "no keyboard month part in the delivery tree: " + deliveryTree());
             } else {
                 assertTrue(harness.s3.exists(BUCKET, CURRENT_TABLES + table + ".parquet"),
