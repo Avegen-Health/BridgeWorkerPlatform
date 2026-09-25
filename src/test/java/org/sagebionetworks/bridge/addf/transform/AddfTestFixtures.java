@@ -21,7 +21,21 @@ import org.sagebionetworks.bridge.rest.model.Upload;
 public final class AddfTestFixtures {
     public static final String RECORD_ID = "rec-1";
     public static final String HEALTH_CODE = "health-code";
-    public static final String CLIENT_INFO_STRING = "biaffect-3/68 (iPhone 11 Pro; iOS/26.5.2)";
+    /**
+     * What {@code HealthDataRecordEx3.getClientInfo()} actually returns — a JSON object, not a user-agent string.
+     * The earlier fixture stubbed the user-agent string here, which is why the transform tests passed while every
+     * delivered row had a null {@code app_version}/{@code platform}/{@code device_name}/{@code os_*}.
+     */
+    public static final String CLIENT_INFO_JSON = "{\n"
+            + "  \"appName\" : \"biaffect-3\",\n"
+            + "  \"appVersion\" : 68,\n"
+            + "  \"deviceName\" : \"iPhone 11 Pro\",\n"
+            + "  \"osName\" : \"iPhone OS\",\n"
+            + "  \"osVersion\" : \"26.5.2\",\n"
+            + "  \"type\" : \"ClientInfo\"\n"
+            + "}";
+    /** What {@code HealthDataRecordEx3.getUserAgent()} returns — the fallback form. */
+    public static final String USER_AGENT = "biaffect-3/68 (iPhone 11 Pro; iOS/26.5.2)";
     public static final String UPLOADED_ON = "2026-08-15T14:30:00.000Z";
 
     private AddfTestFixtures() {
@@ -41,8 +55,8 @@ public final class AddfTestFixtures {
         HealthDataRecordEx3 record = mock(HealthDataRecordEx3.class);
         when(record.getId()).thenReturn(RECORD_ID);
         when(record.getHealthCode()).thenReturn(HEALTH_CODE);
-        when(record.getUserAgent()).thenReturn("BiAffect/68");
-        when(record.getClientInfo()).thenReturn(CLIENT_INFO_STRING);
+        when(record.getUserAgent()).thenReturn(USER_AGENT);
+        when(record.getClientInfo()).thenReturn(CLIENT_INFO_JSON);
         return record;
     }
 
@@ -65,7 +79,8 @@ public final class AddfTestFixtures {
 
     public static FlattenContext context(Map<String, JsonNode> jsonFiles, Integer participantVersion, boolean test) {
         DecryptedArchive archive = archive(jsonFiles);
-        ClientInfo clientInfo = ClientInfo.parse(CLIENT_INFO_STRING);
+        // Resolved exactly as the accumulate worker does, from both record fields.
+        ClientInfo clientInfo = ClientInfo.fromRecord(CLIENT_INFO_JSON, USER_AGENT);
         return new FlattenContext(archive, clientInfo, participantVersion, test, UPLOADED_ON);
     }
 }
