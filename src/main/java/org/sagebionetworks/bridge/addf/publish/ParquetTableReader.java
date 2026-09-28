@@ -55,15 +55,31 @@ public class ParquetTableReader {
                 .build()) {
             GenericRecord record;
             while ((record = reader.read()) != null) {
-                Object keyValue = normalise(record.get(keyColumn));
+                Object keyValue = normalise(get(record, keyColumn));
                 TableRow row = new TableRow(table, keyValue == null ? null : keyValue.toString());
                 for (Column column : columns) {
-                    row.put(column.getName(), normalise(record.get(column.getName())));
+                    row.put(column.getName(), normalise(get(record, column.getName())));
                 }
                 rows.add(row);
             }
         }
         return rows;
+    }
+
+    /**
+     * Read one field, tolerating a file written before that column existed.
+     *
+     * <p>{@code GenericRecord.get(String)} <b>throws</b> {@code AvroRuntimeException: Not a valid schema field} when the
+     * record's own schema has no such field — it does not return null. So widening a table in {@link AddfTables} would
+     * otherwise crash the first publish that reads the previous snapshot's consolidated file, which is exactly the file
+     * {@code SnapshotDeltaBuilder} must read in order to rewrite it to the new column list. Narrowing was always safe
+     * (a column the contract dropped is simply never asked for), which is why removing
+     * {@code PII_WITHHELD_PARTICIPANT_FIELDS} needed nothing here.</p>
+     *
+     * <p>Null is the correct value: the row predates the column, and every ADDF field is a nullable union by design.</p>
+     */
+    private static Object get(GenericRecord record, String field) {
+        return record.getSchema().getField(field) == null ? null : record.get(field);
     }
 
     /**
