@@ -17,8 +17,8 @@ import org.joda.time.format.ISODateTimeFormat;
  * {@code time_zone} is "effectively Z today" because {@code clientTimeZone} on the record is usually null. However the
  * delivered golden previews show real offsets (e.g. {@code -04:00}) for the survey/task tables — those come not from
  * {@code clientTimeZone} but from the offset embedded in the assessment payload's ISO timestamps (info.json
- * {@code createdOn}, gonogo/trailmaking {@code startDate}). Keyboard sessions use epoch timestamps with no offset, so
- * their {@code time_zone} is left empty — matching the golden {@code keyboard_sessions} preview. This class therefore
+ * {@code createdOn}, gonogo/trailmaking {@code startDate}). Keyboard sessions use epoch timestamps with no offset for
+ * {@code session_start}, but their {@code time_zone} is recovered from the {@code info.json createdOn} offset. This class
  * <em>extracts</em> the offset from a payload timestamp rather than fabricating {@code Z}. Flagged for review: if the
  * FAIR workbook mandates {@code Z}-only, switch {@link #offsetFromIso} callers to emit null/Z.</p>
  */
@@ -32,8 +32,8 @@ public final class AddfDateUtils {
 
     /**
      * Convert Unix epoch <b>seconds</b> (as the keyboard {@code Session.json} keylog {@code timestamp}s use) to
-     * ISO-8601 UTC. Null-safe. There is no capture-time offset in these values, so keyboard rows have a null
-     * {@code time_zone} (matching the golden {@code keyboard_sessions} preview).
+     * ISO-8601 UTC. Null-safe. The epoch value itself carries no offset; keyboard {@code time_zone} is sourced
+     * separately from the {@code info.json createdOn} offset.
      */
     public static String epochSecondsToUtcIso(Double epochSeconds) {
         if (epochSeconds == null) {

@@ -60,6 +60,18 @@ public class KeyboardSessionsBuilderTest {
     }
 
     @Test
+    public void timeZoneFromInfoJson() {
+        Map<String, JsonNode> files = new HashMap<>();
+        files.put("Session.json", node("{\"keylogs\":[" +
+                "{\"value\":\"alphabet\",\"duration\":0.1,\"timestamp\":100.0}]}"));
+        files.put("info.json", node("{\"createdOn\":\"2026-08-20T13:05:10.341+02:00\"}"));
+
+        TableRow row = builder.build(AddfTestFixtures.context(files));
+
+        assertEquals(row.get("time_zone"), "+02:00");
+    }
+
+    @Test
     public void motionAbsentLeavesMotionColumnsNull() {
         Map<String, JsonNode> files = new HashMap<>();
         files.put("Session.json", node("{\"keylogs\":[{\"value\":\"alphabet\",\"timestamp\":5.0}]}"));

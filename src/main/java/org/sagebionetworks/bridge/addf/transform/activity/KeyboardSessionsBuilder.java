@@ -14,8 +14,8 @@ import org.sagebionetworks.bridge.addf.transform.TableRow;
 /**
  * {@code keyboard_sessions} builder. Reads {@code Session.json} ({@code keylogs[]}) for the typing summaries and
  * {@code motion.json} for the accelerometer summaries. The {@code keylogs} column holds the verbatim keylogs array.
- * Keyboard timestamps are Unix epoch seconds with no offset, so {@code session_start} is UTC-derived and
- * {@code time_zone} is left null (matching the golden preview).
+ * Keyboard timestamps are Unix epoch seconds with no offset, so {@code session_start} is UTC-derived.
+ * {@code time_zone} is recovered from the {@code info.json createdOn} ISO timestamp which carries the capture offset.
  */
 @Component
 public class KeyboardSessionsBuilder extends AbstractActivityRowBuilder {
@@ -57,7 +57,7 @@ public class KeyboardSessionsBuilder extends AbstractActivityRowBuilder {
         Double durationSec = doubleOrNull(session, "duration");
         row.put("session_start", AddfDateUtils.epochSecondsToUtcIso(
                 sessionStartEpoch != null ? sessionStartEpoch : k.sessionStartEpoch));
-        row.put("time_zone", null); // epoch timestamps carry no offset
+        row.put("time_zone", AddfDateUtils.offsetFromIso(infoCreatedOnRaw(ctx)));
         row.put("duration_sec", durationSec != null ? durationSec : k.durationSec);
         row.put("total_keys", k.totalKeys);
         row.put("n_alphabet", k.nAlphabet);
