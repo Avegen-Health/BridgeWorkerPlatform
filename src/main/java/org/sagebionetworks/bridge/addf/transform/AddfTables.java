@@ -42,20 +42,16 @@ public final class AddfTables {
     public static final String FILE_RECORDS = "file_records";
 
     /**
-     * The two columns the FAIR workbook declares for {@code participant_versions} / {@code participants_current} that
-     * we deliberately do <b>not</b> deliver. Both carry the account's {@code externalId} — the enrolment identifier
-     * the site chooses, in practice a person's name ({@code study_memberships} carries it verbatim inside
-     * {@code |studyId=externalId|}). {@code externalId} is Class A PII, which must never appear in a
-     * researcher-visible export, and the delivery README promises ADDI that the participant is identified only by the
-     * de-identified {@code health_code}; shipping either column defeats that promise.
+     * {@code external_id} is the one workbook column we deliberately do <b>not</b> deliver: it carries the account's
+     * site-chosen enrolment identifier (in practice a person's name), which is Class A PII. The delivery README
+     * promises ADDI that the participant is identified only by the de-identified {@code health_code}.
      *
-     * <p>Nothing analytical is lost: {@code study_id} keeps the study dimension (derived from the membership keys, not
-     * the values) and {@code (health_code, participant_version)} keeps every join. The workbook remains the schema
-     * authority for everything else — {@code AddfTablesFairConformanceTest} subtracts exactly this set from the
-     * workbook's participant fields before comparing, so any <em>other</em> divergence still fails.</p>
+     * <p>{@code study_memberships} <em>is</em> delivered, in Synapse's {@code |biaffect-3-study=|} shape but with the
+     * external ID unconditionally stripped rather than merely absent. See
+     * {@link ParticipantVersionRowBuilder#truncateStudyMemberships}.</p>
      */
     public static final Set<String> PII_WITHHELD_PARTICIPANT_FIELDS =
-            ImmutableSet.of("external_id", "study_memberships");
+            ImmutableSet.of("external_id");
 
     private static final Map<String, List<Column>> COLUMNS;
     static {
@@ -193,8 +189,8 @@ public final class AddfTables {
                 Column.of("other_illness", ColumnType.TEXT),
                 Column.of("collected_on", ColumnType.DATETIME)));
 
-        // 9 of the workbook's 11 participant columns — external_id and study_memberships are withheld, see
-        // PII_WITHHELD_PARTICIPANT_FIELDS below.
+        // 10 of the workbook's 11 participant columns — only external_id is withheld. study_memberships is delivered
+        // as |studyId=| with the external ID stripped (see ParticipantVersionRowBuilder#truncateStudyMemberships).
         List<Column> participantVersionCols = ImmutableList.of(
                 Column.of("health_code", ColumnType.TEXT),
                 Column.of("participant_version", ColumnType.INTEGER),
@@ -203,6 +199,7 @@ public final class AddfTables {
                 Column.of("data_groups", ColumnType.TEXT),
                 Column.of("languages", ColumnType.TEXT),
                 Column.of("client_time_zone", ColumnType.TEXT),
+                Column.of("study_memberships", ColumnType.TEXT),
                 Column.of("created_on", ColumnType.DATETIME),
                 Column.of("modified_on", ColumnType.DATETIME));
         m.put(PARTICIPANT_VERSIONS, participantVersionCols);

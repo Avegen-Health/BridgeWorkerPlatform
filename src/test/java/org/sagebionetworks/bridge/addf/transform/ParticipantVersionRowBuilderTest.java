@@ -20,7 +20,6 @@ import org.sagebionetworks.bridge.rest.model.SharingScope;
 
 public class ParticipantVersionRowBuilderTest {
     private static final String HEALTH_CODE = "health-code";
-    /** The sentinel BS2 stores in studyMemberships for a participant enrolled without an external ID. */
     private static final String EXT_ID_NONE = "<none>";
     private static final DateTime CREATED_ON = new DateTime(2022, 1, 14, 1, 19, 21, 201, DateTimeZone.forOffsetHours(-8));
     private static final DateTime MODIFIED_ON = new DateTime(2022, 1, 15, 2, 0, 0, 0, DateTimeZone.UTC);
@@ -61,12 +60,11 @@ public class ParticipantVersionRowBuilderTest {
         assertEquals(row.get("data_groups"), "aaa,bbb");
         assertEquals(row.get("languages"), "en|es");
         assertEquals(row.get("client_time_zone"), "America/New_York");
+        // Synapse's shape, external ID stripped — and byte-identical to the Sage golden delivery's value.
+        assertEquals(row.get("study_memberships"), "|biaffect-3-study=|");
         assertEquals(row.get("created_on"), "2022-01-14T09:19:21.201Z");
         assertEquals(row.get("modified_on"), "2022-01-15T02:00:00.000Z");
 
-        // The external ID was present on the snapshot and must not have reached the row in any form — not as a column
-        // of its own, and not serialised inside study_memberships. assertNull would pass on a row that never had the
-        // key; assert on the key set so a re-added column fails here rather than in ADDI's container.
         assertEquals(row.getValues().keySet(),
                 new LinkedHashSet<>(AddfTables.columnNames(AddfTables.PARTICIPANT_VERSIONS)));
         assertFalse(row.getValues().toString().contains("ext-1"));
@@ -87,6 +85,7 @@ public class ParticipantVersionRowBuilderTest {
         assertNull(row.get("sharing_scope"));
         assertNull(row.get("data_groups"));
         assertNull(row.get("languages"));
+        assertNull(row.get("study_memberships"));
     }
 
     @Test
@@ -96,10 +95,10 @@ public class ParticipantVersionRowBuilderTest {
 
         TableRow row = builder.build(pv, false);
 
-        // study_id is derived from the membership keys; the values (external IDs) are dropped entirely.
         assertEquals(row.get("study_id"), "s1,s2");
-        assertFalse(row.getValues().values().contains("x"));
-        assertFalse(row.getValues().values().contains("y"));
+        assertEquals(row.get("study_memberships"), "|s1=|s2=|");
+        assertFalse(row.getValues().toString().contains("=x"));
+        assertFalse(row.getValues().toString().contains("=y"));
     }
 
     @Test
@@ -110,6 +109,31 @@ public class ParticipantVersionRowBuilderTest {
         TableRow row = builder.build(pv, false);
 
         assertEquals(row.get("study_id"), "only-study");
-        assertFalse(row.getValues().values().contains(EXT_ID_NONE));
+        assertEquals(row.get("study_memberships"), "|only-study=|");
+        assertFalse(row.getValues().toString().contains(EXT_ID_NONE));
+    }
+
+    @Test
+    public void truncateStudyMembershipsUnit() {
+        assertNull(ParticipantVersionRowBuilder.truncateStudyMemberships(null));
+        assertNull(ParticipantVersionRowBuilder.truncateStudyMemberships(ImmutableMap.of()));
+        assertEquals(ParticipantVersionRowBuilder.truncateStudyMemberships(
+                ImmutableMap.of("b-study", "x", "a-study", "y")), "|a-study=|b-study=|");
+    }
+
+    /**
+     * The regression that matters. E3's serialiser would emit {@code |biaffect-3-study=john-doe|} here; the Sage golden
+     * delivery only looks truncated because no BiAffect participant has an external ID yet. Assert the value is gone
+     * even when one is present, or a future enrolment silently ships a name to ADDI.
+     */
+    @Test
+    public void presentExternalIdIsStrippedNotPassedThrough() {
+        ParticipantVersion pv = baseVersion();
+        when(pv.getStudyMemberships()).thenReturn(ImmutableMap.of("biaffect-3-study", "john-doe"));
+
+        TableRow row = builder.build(pv, false);
+
+        assertEquals(row.get("study_memberships"), "|biaffect-3-study=|");
+        assertFalse(row.getValues().toString().contains("john-doe"));
     }
 }

@@ -178,8 +178,7 @@ public class AddfTablesFairConformanceTest {
 
     @Test
     public void theWithheldPiiFieldsAreNeverDeclaredOnAnyTable() {
-        // The subtraction in deliverable() is scoped to the two participant tables; this makes the stronger claim the
-        // PR actually promises — external_id / study_memberships are not delivered anywhere, under any table.
+        // external_id is withheld everywhere — it carries the site's enrolment identifier (PII).
         for (String table : AddfTables.allTables()) {
             for (String withheld : AddfTables.PII_WITHHELD_PARTICIPANT_FIELDS) {
                 assertTrue(!AddfTables.columnNames(table).contains(withheld),
